@@ -30,7 +30,7 @@ class SimpleGridPage(QFrame):
         bl = QHBoxLayout(bar)
         bl.setContentsMargins(14, 12, 14, 12)
         title = QLabel("收藏夹" if kind == "favorites" else "最近播放")
-        title.setStyleSheet(f"color: {T.TEXT}; font-size: 15px; font-weight: 600;")
+        T.style(title, "color: $TEXT; font-size: 15px; font-weight: 600;")
         bl.addWidget(title)
         bl.addStretch()
         b = QPushButton("⟳  刷新")
@@ -43,7 +43,7 @@ class SimpleGridPage(QFrame):
 
         self.grid = VideoGridView(thumbs, self)
         self.grid.playRequested.connect(self.playRequested.emit)
-        self.grid.setStyleSheet(f"QListView {{ background: {T.BG}; padding: 6px; }}")
+        T.style(self.grid, "QListView { background: $BG; padding: 6px; }")
         root.addWidget(self.grid, 1)
         self.reload()
 
@@ -70,7 +70,7 @@ class RecordPage(QFrame):
         root.setSpacing(14)
 
         h = QLabel("录屏工作台")
-        h.setStyleSheet(f"color: {T.TEXT}; font-size: 18px; font-weight: 700;")
+        T.style(h, "color: $TEXT; font-size: 18px; font-weight: 700;")
         root.addWidget(h)
 
         self.status = QFrame()
@@ -80,11 +80,11 @@ class RecordPage(QFrame):
         sl.setSpacing(8)
         self.lbl_obs = QLabel("")
         self.lbl_obs.setWordWrap(True)
-        self.lbl_obs.setStyleSheet(f"color: {T.TEXT}; font-size: 13px; line-height: 160%;")
+        T.style(self.lbl_obs, "color: $TEXT; font-size: 13px; line-height: 160%;")
         sl.addWidget(self.lbl_obs)
         self.lbl_detail = QLabel("")
         self.lbl_detail.setWordWrap(True)
-        self.lbl_detail.setStyleSheet(f"color: {T.TEXT_DIM}; font-size: 12px; line-height: 165%;")
+        T.style(self.lbl_detail, "color: $TEXT_DIM; font-size: 12px; line-height: 165%;")
         sl.addWidget(self.lbl_detail)
         root.addWidget(self.status)
 

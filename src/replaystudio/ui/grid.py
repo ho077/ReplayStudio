@@ -13,6 +13,7 @@ from PySide6.QtCore import (QAbstractListModel, QModelIndex, QObject, Qt,
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QAbstractItemView, QListView, QMenu, QScroller
 
+from . import theme as T
 from .widgets import VideoCardDelegate
 
 
@@ -138,9 +139,9 @@ class VideoGridView(QListView):
         if not row:
             return
         menu = QMenu(self)
-        menu.setStyleSheet("QMenu{background:#26262E;color:#EDEDF0;border:1px solid #33333D;"
-                           "padding:4px;} QMenu::item{padding:7px 24px;border-radius:5px;}"
-                           "QMenu::item:selected{background:#FF4655;color:white;}")
+        T.style(menu, "QMenu{background:$SURFACE_2;color:$TEXT;border:1px solid $BORDER;"
+                      "padding:4px;} QMenu::item{padding:7px 24px;border-radius:5px;}"
+                      "QMenu::item:selected{background:$ACCENT;color:$ON_ACCENT;}")
         a1 = menu.addAction("▶  播放")
         a2 = menu.addAction("★  收藏 / 取消收藏")
         a3 = menu.addAction("🏷  编辑标签…")

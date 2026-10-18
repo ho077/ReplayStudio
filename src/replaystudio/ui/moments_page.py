@@ -101,7 +101,7 @@ class MomentsPage(QFrame):
         self.grid.addTagRequested.connect(self.tagRequested.emit)
         self.grid.locateRequested.connect(self.locateRequested.emit)
         self.grid.needMore.connect(self.load_more)
-        self.grid.setStyleSheet(f"QListView {{ background: {T.BG}; padding: 6px; }}")
+        T.style(self.grid, "QListView { background: $BG; padding: 6px; }")
         root.addWidget(self.grid, 1)
 
         self._debounce_timer = None

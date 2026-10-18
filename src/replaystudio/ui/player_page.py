@@ -98,7 +98,7 @@ class TimelineSlider(QWidget):
             x = w * (sec / self._maximum)
             if x > w:
                 continue
-            color = QColor(T.ACCENT if kind == "kill" else "#7A7A8C")
+            color = QColor(T.ACCENT if kind == "kill" else T.DEATH)
             p.setBrush(color)
             p.setPen(Qt.NoPen)
             p.drawRoundedRect(int(x) - 1, track_y - 5, 2, track_h + 10, 1, 1)
@@ -151,11 +151,11 @@ class PlayerPage(QFrame):
         back.clicked.connect(self.backRequested.emit)
         head.addWidget(back)
         self.title_label = QLabel("")
-        self.title_label.setStyleSheet(f"font-size: 15px; font-weight: 600; color: {T.TEXT};")
+        T.style(self.title_label, "font-size: 15px; font-weight: 600; color: $TEXT;")
         head.addWidget(self.title_label)
         head.addStretch()
         self.info_label = QLabel("")
-        self.info_label.setStyleSheet(f"color: {T.TEXT_DIM}; font-size: 12px;")
+        T.style(self.info_label, "color: $TEXT_DIM; font-size: 12px;")
         head.addWidget(self.info_label)
         root.addLayout(head)
 
@@ -165,7 +165,7 @@ class PlayerPage(QFrame):
         body.setSpacing(12)
 
         self.video_host = QWidget()
-        self.video_host.setStyleSheet("background: #000; border-radius: 10px;")
+        T.style(self.video_host, "background: #000; border-radius: ${RADIUS}px;")
         self.video_host.setMinimumSize(480, 270)
         self.video_host.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.video_host.setAttribute(Qt.WA_NativeWindow, True)
@@ -179,15 +179,15 @@ class PlayerPage(QFrame):
         sl.setContentsMargins(12, 12, 12, 12)
         sl.setSpacing(8)
         self.meta_label = QLabel("对局信息")
-        self.meta_label.setStyleSheet(f"color: {T.TEXT}; font-weight: 600; font-size: 13px;")
+        T.style(self.meta_label, "color: $TEXT; font-weight: 600; font-size: 13px;")
         sl.addWidget(self.meta_label)
         self.meta_body = QLabel("—")
         self.meta_body.setWordWrap(True)
-        self.meta_body.setStyleSheet(f"color: {T.TEXT_DIM}; font-size: 12px; line-height: 150%;")
+        T.style(self.meta_body, "color: $TEXT_DIM; font-size: 12px; line-height: 150%;")
         sl.addWidget(self.meta_body)
         sl.addSpacing(6)
         ev_title = QLabel("事件时间轴")
-        ev_title.setStyleSheet(f"color: {T.TEXT}; font-weight: 600; font-size: 13px;")
+        T.style(ev_title, "color: $TEXT; font-weight: 600; font-size: 13px;")
         sl.addWidget(ev_title)
         self.event_list = QWidget()
         self.event_list.setLayout(QVBoxLayout())
@@ -200,7 +200,7 @@ class PlayerPage(QFrame):
 
         # ---- transport
         bar = QFrame()
-        bar.setStyleSheet(f"background: {T.SURFACE}; border-top: 1px solid {T.BORDER};")
+        T.style(bar, "background: $SURFACE; border-top: 1px solid $BORDER;")
         bl = QVBoxLayout(bar)
         bl.setContentsMargins(14, 6, 14, 10)
         bl.setSpacing(4)
@@ -224,7 +224,7 @@ class PlayerPage(QFrame):
             row.addWidget(b)
 
         self.time_label = QLabel("00:00 / 00:00")
-        self.time_label.setStyleSheet(f"color: {T.TEXT_DIM}; font-size: 12px;")
+        T.style(self.time_label, "color: $TEXT_DIM; font-size: 12px;")
         self.time_label.setMinimumWidth(105)
         row.addWidget(self.time_label)
         row.addStretch()
@@ -349,11 +349,11 @@ class PlayerPage(QFrame):
             self._event_markers.append((sec, ev["etype"]))
             b = QPushButton(f"{human_time(sec)}  {self._event_text(ev)}")
             b.setCursor(Qt.PointingHandCursor)
-            color = T.ACCENT if ev["etype"] == "kill" else "#7A7A8C"
-            b.setStyleSheet(f"""
-                QPushButton {{ background: transparent; border: none; text-align: left;
-                    color: {T.TEXT_DIM}; padding: 5px 8px; border-radius: 6px; font-size: 12px; }}
-                QPushButton:hover {{ background: {T.SURFACE_2}; color: {T.TEXT}; }}
+            color = T.ACCENT if ev["etype"] == "kill" else T.DEATH
+            T.style(b, """
+                QPushButton { background: transparent; border: none; text-align: left;
+                    color: $TEXT_DIM; padding: 5px 8px; border-radius: 6px; font-size: 12px; }
+                QPushButton:hover { background: $SURFACE_2; color: $TEXT; }
             """)
             b.clicked.connect(lambda _=False, s=sec: self.seek_to(s))
             lay.addWidget(b)
@@ -442,12 +442,12 @@ class PlayerPage(QFrame):
         self.btn_play.setText("▶")
 
     def _on_error(self, msg: str):
-        self.info_label.setStyleSheet(f"color: {T.AMBER}; font-size: 12px;")
+        T.style(self.info_label, "color: $AMBER; font-size: 12px;")
         self.info_label.setText(msg)
         self.btn_play.setText("▶")
 
     def clear_error(self):
-        self.info_label.setStyleSheet(f"color: {T.TEXT_DIM}; font-size: 12px;")
+        T.style(self.info_label, "color: $TEXT_DIM; font-size: 12px;")
 
     def shutdown(self):
         self._timer.stop()

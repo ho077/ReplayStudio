@@ -58,11 +58,11 @@ class LocalPage(QFrame):
         split = QSplitter(Qt.Horizontal)
         self.folders = QListWidget()
         self.folders.setMaximumWidth(240)
-        self.folders.setStyleSheet(f"""
-            QListWidget {{ background: {T.SURFACE}; border: none; padding: 6px; }}
-            QListWidget::item {{ padding: 8px 10px; border-radius: 6px; color: {T.TEXT_DIM}; }}
-            QListWidget::item:selected {{ background: {T.ACCENT}; color: white; }}
-            QListWidget::item:hover {{ background: {T.SURFACE_2}; color: {T.TEXT}; }}
+        T.style(self.folders, """
+            QListWidget { background: $SURFACE; border: none; padding: 6px; }
+            QListWidget::item { padding: 8px 10px; border-radius: 6px; color: $TEXT_DIM; }
+            QListWidget::item:selected { background: $ACCENT; color: $ON_ACCENT; }
+            QListWidget::item:hover { background: $SURFACE_2; color: $TEXT; }
         """)
         self.folders.currentTextChanged.connect(self.reload)
         split.addWidget(self.folders)
@@ -70,7 +70,7 @@ class LocalPage(QFrame):
         self.grid = VideoGridView(thumbs, self)
         self.grid.playRequested.connect(self.playRequested.emit)
         self.grid.needMore.connect(self.load_more)
-        self.grid.setStyleSheet(f"QListView {{ background: {T.BG}; padding: 6px; }}")
+        T.style(self.grid, "QListView { background: $BG; padding: 6px; }")
         split.addWidget(self.grid)
         split.setStretchFactor(1, 1)
         root.addWidget(split, 1)

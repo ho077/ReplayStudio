@@ -7,8 +7,8 @@ import time
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QShortcut, QKeySequence
-from PySide6.QtWidgets import (QFrame, QHBoxLayout, QInputDialog, QLabel,
-                               QMainWindow, QProgressBar, QPushButton,
+from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QInputDialog,
+                               QLabel, QMainWindow, QProgressBar, QPushButton,
                                QSizeGrip, QStackedWidget, QVBoxLayout, QWidget)
 
 from ..aclos import reader
@@ -36,6 +36,8 @@ class MainWindow(QMainWindow):
 
         self.db = Database()
         self.settings = Settings(self.db)
+        T.init_theme(None, self.settings.get("theme", T.DEFAULT_KEY))
+        self.setStyleSheet(T.QSS)
         self.thumbs = ThumbnailService(self)
         self._scan_worker = None
         self._play_context: list[dict] = []
@@ -65,11 +67,11 @@ class MainWindow(QMainWindow):
 
         # ---- status bar
         status = QFrame()
-        status.setStyleSheet(f"background: {T.SURFACE}; border-top: 1px solid {T.BORDER};")
+        T.style(status, "background: $SURFACE; border-top: 1px solid $BORDER;")
         sl = QHBoxLayout(status)
         sl.setContentsMargins(14, 5, 14, 5)
         self.status_label = QLabel("就绪")
-        self.status_label.setStyleSheet(f"color: {T.TEXT_DIM}; font-size: 12px;")
+        T.style(self.status_label, "color: $TEXT_DIM; font-size: 12px;")
         sl.addWidget(self.status_label, 1)
         self.progress = QProgressBar()
         self.progress.setFixedWidth(180)
@@ -121,6 +123,19 @@ class MainWindow(QMainWindow):
         self.player_page.positionReported.connect(self._record_position)
 
         self._nav_before_player = "moments"
+
+    def apply_theme(self, key: str):
+        """Swap the palette live: rebind constants → re-render every registered
+        `$KEY` template → repaint everything the delegate draws."""
+        T.apply_theme(QApplication.instance(), key)
+        # The window carries its own copy of the QSS, which takes precedence
+        # over the app-level one — refresh it too.
+        self.setStyleSheet(T.QSS)
+        self.settings["theme"] = T.current_key()
+        for page in (self.moments, self.local, self.favorites, self.recent):
+            page.grid.viewport().update()
+        self.player_page.timeline.update()
+        self.set_status(f"已切换主题：{T.palette().name}")
 
     def navigate(self, key: str):
         pages = {"moments": self.moments, "local": self.local, "record": self.record,

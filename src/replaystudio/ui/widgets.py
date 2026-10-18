@@ -61,10 +61,10 @@ class TitleBar(QFrame):
         lay.setSpacing(2)
 
         icon = QLabel("●")
-        icon.setStyleSheet(f"color: {T.ACCENT}; font-size: 16px;")
+        T.style(icon, "color: $ACCENT; font-size: 16px;")
         lay.addWidget(icon)
         self.title = QLabel(title)
-        self.title.setStyleSheet(f"color: {T.TEXT_DIM}; font-size: 12.5px;")
+        T.style(self.title, "color: $TEXT_DIM; font-size: 12.5px;")
         lay.addWidget(self.title)
         lay.addStretch()
 
@@ -172,12 +172,12 @@ class SearchEdit(QLineEdit):
         self.setObjectName("searchEdit")
         self.setPlaceholderText(placeholder)
         self.setFixedHeight(32)
-        self.setStyleSheet(f"""
-            QLineEdit {{
-                background: {T.SURFACE_2}; border: 1px solid {T.BORDER};
-                border-radius: 8px; padding: 0 10px 0 30px; color: {T.TEXT};
-            }}
-            QLineEdit:focus {{ border-color: {T.ACCENT}; }}
+        T.style(self, """
+            QLineEdit {
+                background: $SURFACE_2; border: 1px solid $BORDER;
+                border-radius: 8px; padding: 0 10px 0 30px; color: $TEXT;
+            }
+            QLineEdit:focus { border-color: $ACCENT; }
         """)
 
 
@@ -195,16 +195,16 @@ class ChipButton(QPushButton):
 
     def _refresh(self):
         if self.isChecked():
-            self.setStyleSheet(f"""
-                QPushButton {{ background: {T.ACCENT}; color: white; border: none;
-                    border-radius: 8px; padding: 0 12px; font-weight: 600; font-size: 12px; }}
+            T.style(self, """
+                QPushButton { background: $ACCENT; color: $ON_ACCENT; border: none;
+                    border-radius: 8px; padding: 0 12px; font-weight: 600; font-size: 12px; }
             """)
         else:
-            self.setStyleSheet(f"""
-                QPushButton {{ background: {T.SURFACE_2}; color: {T.TEXT_DIM};
-                    border: 1px solid {T.BORDER}; border-radius: 8px;
-                    padding: 0 12px; font-size: 12px; }}
-                QPushButton:hover {{ background: {T.CARD_HOVER}; color: {T.TEXT}; }}
+            T.style(self, """
+                QPushButton { background: $SURFACE_2; color: $TEXT_DIM;
+                    border: 1px solid $BORDER; border-radius: 8px;
+                    padding: 0 12px; font-size: 12px; }
+                QPushButton:hover { background: $CARD_HOVER; color: $TEXT; }
             """)
 
     def setChecked(self, checked: bool):
@@ -264,8 +264,8 @@ class VideoCardDelegate(QStyledItemDelegate):
             painter.setClipping(False)
         else:
             g = QLinearGradient(cover_rect.topLeft(), cover_rect.bottomRight())
-            g.setColorAt(0, QColor("#2B2B35"))
-            g.setColorAt(1, QColor("#1D1D24"))
+            g.setColorAt(0, QColor(T.GRAD_A))
+            g.setColorAt(1, QColor(T.GRAD_B))
             painter.setBrush(QBrush(g))
             painter.setPen(Qt.NoPen)
             cp = QPainterPath()
@@ -335,7 +335,7 @@ class VideoCardDelegate(QStyledItemDelegate):
             bx = rect.right() - fw - 10
             if data.get("fav"):
                 bx -= 18
-            painter.setBrush(QBrush(QColor(color + "33")))
+            painter.setBrush(QBrush(QColor(T.qalpha(color, "33"))))
             painter.setPen(Qt.NoPen)
             painter.drawRoundedRect(QRectF(bx, ty + 35, fw, 16), 4, 4)
             painter.setPen(QColor(color))

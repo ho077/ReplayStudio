@@ -6,9 +6,9 @@ import shutil
 import subprocess
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import (QComboBox, QFileDialog, QFrame, QHBoxLayout,
-                               QLabel, QLineEdit, QMessageBox, QPushButton,
-                               QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QComboBox, QFileDialog, QFrame,
+                               QGridLayout, QHBoxLayout, QLabel, QLineEdit,
+                               QMessageBox, QPushButton, QVBoxLayout, QWidget)
 
 from ..aclos import reader
 from ..core.db import user_data_dir
@@ -26,9 +26,48 @@ def _card(title: str) -> tuple[QFrame, QVBoxLayout]:
     lay.setContentsMargins(16, 14, 16, 14)
     lay.setSpacing(8)
     h = QLabel(title)
-    h.setStyleSheet(f"color: {T.TEXT}; font-size: 14px; font-weight: 600;")
+    T.style(h, "color: $TEXT; font-size: 14px; font-weight: 600;")
     lay.addWidget(h)
     return f, lay
+
+
+class ThemeCard(QPushButton):
+    """One themed tile: horizon strip of swatches + name + description."""
+
+    def __init__(self, pal, parent=None):
+        super().__init__(parent)
+        self.pal = pal
+        self.setObjectName("themeCard")
+        self.setCursor(Qt.PointingHandCursor)
+        self.setMinimumHeight(84)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(12, 10, 12, 10)
+        outer.setSpacing(6)
+
+        strip = QHBoxLayout()
+        strip.setSpacing(0)
+        for color, stretch in ((pal.BG, 3), (pal.SURFACE, 2),
+                               (pal.CARD, 2), (pal.ACCENT, 3)):
+            sw = QLabel()
+            sw.setObjectName("swatch")
+            sw.setFixedHeight(18)
+            sw.setStyleSheet(f"background: {color}; border-radius: 3px;")
+            strip.addWidget(sw, stretch)
+        outer.addLayout(strip)
+
+        name = QLabel(pal.name)
+        name.setObjectName("themeName")
+        outer.addWidget(name)
+        desc = QLabel(pal.desc)
+        desc.setObjectName("themeDesc")
+        desc.setWordWrap(True)
+        outer.addWidget(desc)
+
+    def set_active(self, active: bool):
+        self.setProperty("active", "true" if active else "false")
+        self.style().unpolish(self)
+        self.style().polish(self)
 
 
 class SettingsPage(QFrame):
@@ -44,6 +83,19 @@ class SettingsPage(QFrame):
         root.setContentsMargins(20, 18, 20, 18)
         root.setSpacing(14)
 
+        # ---------------- appearance
+        c5, l5 = _card("外观主题")
+        grid = QGridLayout()
+        grid.setSpacing(10)
+        self.theme_cards: list[ThemeCard] = []
+        for i, pal in enumerate(T.palette_list()):
+            card = ThemeCard(pal, self)
+            card.clicked.connect(lambda _=False, k=pal.key: self._pick_theme(k))
+            self.theme_cards.append(card)
+            grid.addWidget(card, i // 3, i % 3)
+        l5.addLayout(grid)
+        root.addWidget(c5)
+
         # ---------------- data source
         c1, l1 = _card("无畏时刻数据源")
         row = QHBoxLayout()
@@ -58,7 +110,7 @@ class SettingsPage(QFrame):
         row.addWidget(b_def)
         l1.addLayout(row)
         hint = QLabel("只读取，不修改、不移动、不删除任何 ACLOS 原始文件。")
-        hint.setStyleSheet(f"color: {T.TEXT_FAINT}; font-size: 11.5px;")
+        T.style(hint, "color: $TEXT_FAINT; font-size: 11.5px;")
         l1.addWidget(hint)
         root.addWidget(c1)
 
@@ -80,7 +132,7 @@ class SettingsPage(QFrame):
         r2.addStretch()
         l2.addLayout(r2)
         self.lbl_engine = QLabel("")
-        self.lbl_engine.setStyleSheet(f"color: {T.TEXT_DIM}; font-size: 11.5px;")
+        T.style(self.lbl_engine, "color: $TEXT_DIM; font-size: 11.5px;")
         l2.addWidget(self.lbl_engine)
         self._fill_engine_info()
         root.addWidget(c2)
@@ -88,7 +140,7 @@ class SettingsPage(QFrame):
         # ---------------- index
         c3, l3 = _card("索引与缓存")
         self.lbl_stats = QLabel("")
-        self.lbl_stats.setStyleSheet(f"color: {T.TEXT_DIM}; font-size: 12px;")
+        T.style(self.lbl_stats, "color: $TEXT_DIM; font-size: 12px;")
         l3.addWidget(self.lbl_stats)
         r3 = QHBoxLayout()
         b_rebuild = QPushButton("重建完整索引")
@@ -114,7 +166,7 @@ class SettingsPage(QFrame):
             "ReplayStudio — 本地视频管理、播放与录屏工作台\n"
             "播放引擎：mpv / libmpv（GPLv2+）；界面：Qt for Python（LGPLv3）；\n"
             "缩略图：FFmpeg；数据库：SQLite。所有数据保存在本机，不会上传。")
-        about.setStyleSheet(f"color: {T.TEXT_DIM}; font-size: 12px; line-height: 160%;")
+        T.style(about, "color: $TEXT_DIM; font-size: 12px; line-height: 160%;")
         about.setWordWrap(True)
         l4.addWidget(about)
         root.addWidget(c4)
@@ -132,6 +184,17 @@ class SettingsPage(QFrame):
             self.lbl_engine.setText(f"libmpv 已加载：{d}（{size:.0f} MB）")
         except Exception as exc:
             self.lbl_engine.setText(f"libmpv 不可用：{exc}")
+
+    def _pick_theme(self, key: str):
+        win = self.window()
+        if hasattr(win, "apply_theme"):
+            win.apply_theme(key)
+        for card in self.theme_cards:
+            card.set_active(card.pal.key == T.current_key())
+
+    def _sync_theme_ui(self):
+        for card in self.theme_cards:
+            card.set_active(card.pal.key == T.current_key())
 
     def _pick_dir(self):
         d = QFileDialog.getExistingDirectory(self, "选择 ACLOS WonderfulDb 目录",
@@ -166,6 +229,7 @@ class SettingsPage(QFrame):
             subprocess.Popen(["explorer", path])
 
     def refresh_stats(self):
+        self._sync_theme_ui()
         s = self.db.stats()
         self.lbl_stats.setText(
             f"对局 {s['matches']} 场 · 片段 {s['videos']} 个 · 事件 {s['events']} 条 · "
