@@ -147,10 +147,20 @@ def user_data_dir() -> str:
 
 
 class Database:
-    def __init__(self, path: str | None = None):
+    def __init__(self, path: str | None = None, show_missing: bool = False):
         self.path = path or os.path.join(user_data_dir(), "index.db")
+        # Videos whose source file is gone (the game client purges old clips,
+        # or the user deleted them on purpose) are excluded from every listing
+        # by default. They stay in the index — re-appearing automatically if the
+        # file comes back — but they no longer clutter the grids.
+        self.show_missing = show_missing
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
         self._init_schema()
+
+    @property
+    def missing_clause(self) -> str:
+        """SQL fragment for the current visibility policy ('' = show them)."""
+        return "" if self.show_missing else "v.file_state != 2"
 
     @contextmanager
     def conn(self):
@@ -287,9 +297,13 @@ class Database:
         if f.get("mine_only"):
             where.append("EXISTS(SELECT 1 FROM events e WHERE e.video_id=v.video_id AND e.is_mine=1)")
         if f.get("state") == "missing":
+            # Explicit request ("仅缺失"): show *only* the missing ones, which
+            # overrides the default hiding.
             where.append("v.file_state = 2")
         elif f.get("state") == "ok":
             where.append("v.file_state = 1")
+        elif self.missing_clause:
+            where.append(self.missing_clause)
         q = (f.get("q") or "").strip()
         if q:
             where.append("(v.vname LIKE ? OR v.vtype LIKE ? OR v.path LIKE ? OR m.map_cn LIKE ?"
@@ -322,8 +336,15 @@ class Database:
 
     def facets(self, openid: str | None = None) -> dict:
         """Sidebar facet values with counts, computed from the current index."""
-        pre = "WHERE v.openid = ?" if openid else ""
-        args = [openid] if openid else []
+        conds, args = [], []
+        if openid:
+            conds.append("v.openid = ?")
+            args.append(openid)
+        if self.missing_clause:
+            # Counts must describe what the grid actually shows, otherwise a
+            # facet reads "霓虹町 12" and the grid lists 9.
+            conds.append(self.missing_clause)
+        pre = ("WHERE " + " AND ".join(conds)) if conds else ""
 
         def group(col):
             sql = f"""SELECT {col} AS k, COUNT(*) AS n FROM videos v
@@ -333,7 +354,8 @@ class Database:
                 return [(r["k"], r["n"]) for r in c.execute(sql, args).fetchall() if r["k"]]
 
         with self.conn() as c:
-            total = c.execute("SELECT COUNT(*) n FROM videos").fetchone()["n"]
+            total = c.execute(
+                f"SELECT COUNT(*) n FROM videos v {pre}", args).fetchone()["n"]
             missing = c.execute("SELECT COUNT(*) n FROM videos WHERE file_state=2").fetchone()["n"]
         return {
             "maps": group("m.map_cn"),
@@ -399,13 +421,15 @@ class Database:
                          (SELECT id FROM play_history ORDER BY ts DESC LIMIT 500)""")
 
     def recent(self, limit: int = 60):
+        extra = f"WHERE {self.missing_clause}" if self.missing_clause else ""
         with self.conn() as c:
-            return [dict(r) for r in c.execute("""
+            return [dict(r) for r in c.execute(f"""
                 SELECT v.*, m.map_cn, m.agent_cn, h.ts, h.pos_s,
                        MAX(h.ts) AS last_ts
                 FROM play_history h
                 JOIN videos v ON v.video_id = h.video_id
                 LEFT JOIN matches m ON m.match_id = v.match_id
+                {extra}
                 GROUP BY h.video_id
                 ORDER BY last_ts DESC LIMIT ?""", (limit,)).fetchall()]
 
@@ -463,8 +487,15 @@ class Database:
     def stats(self) -> dict:
         with self.conn() as c:
             v = c.execute("SELECT COUNT(*) n, COALESCE(SUM(size_bytes),0) s FROM videos").fetchone()
+            present = c.execute(
+                "SELECT COUNT(*) n, COALESCE(SUM(size_bytes),0) s FROM videos "
+                "WHERE file_state != 2").fetchone()
             m = c.execute("SELECT COUNT(*) n FROM matches").fetchone()
             e = c.execute("SELECT COUNT(*) n FROM events").fetchone()
             miss = c.execute("SELECT COUNT(*) n FROM videos WHERE file_state=2").fetchone()
-            return {"videos": v["n"], "bytes": v["s"], "matches": m["n"],
-                    "events": e["n"], "missing": miss["n"]}
+            # `videos`/`bytes` describe what the UI lists (missing ones hidden by
+            # default); `all_videos`/`all_bytes` keep the raw index totals so the
+            # settings page can still report how many clips were purged.
+            return {"videos": present["n"], "bytes": present["s"],
+                    "all_videos": v["n"], "all_bytes": v["s"],
+                    "matches": m["n"], "events": e["n"], "missing": miss["n"]}

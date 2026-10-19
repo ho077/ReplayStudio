@@ -13,8 +13,9 @@ episode (no events, twenty siblings) without wasting space.
 from __future__ import annotations
 
 import os
+import sys
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import QPoint, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QPainter
 from PySide6.QtWidgets import (QFileDialog, QFrame, QHBoxLayout, QLabel,
                                QListWidget, QListWidgetItem, QMenu,
@@ -162,6 +163,7 @@ class PlayerPage(QFrame):
         # background, so switching back restores what the user was doing.
         self.parked_playing = False
         self.parked_muted = False
+        self.parked_aid = ""          # audio track id while parked (AO released)
         # Last load error, kept so diagnostics (and tests) can tell "the engine
         # said nothing" apart from "the engine complained".
         self.last_error = ""
@@ -375,14 +377,58 @@ class PlayerPage(QFrame):
     def resizeEvent(self, e):  # noqa: N802
         super().resizeEvent(e)
         self._place_overlays()
+        # The mpv surface is a real HWND; keep it pinned to the widget rect.
+        self._sync_native_surface()
 
     def _place_overlays(self):
         w, h = self.stage.width(), self.stage.height()
         self.overlay.setGeometry(0, 0, w, h)
         self.osd.setGeometry(0, h - 70, w, 34)
 
+    def _sync_native_surface(self):
+        """Pin the mpv host's native window onto its Qt geometry.
+
+        Why this exists: a bare ``QWidget`` with ``WA_NativeWindow`` gets a real
+        HWND, but Qt positions that HWND from the widget geometry *at creation
+        time*. The first player page is built while the main window is still
+        being placed by the window manager, so the HWND ends up offset inside
+        its parent (measured: (283,145) px off on a 125% display) and mpv then
+        renders into that offset rectangle — the "first video is not centred"
+        report. Re-asserting the rect afterwards is cheap and idempotent, and
+        it also covers window moves and DPI changes.
+        """
+        if sys.platform != "win32":
+            return
+        host = self.video_host
+        if not host.testAttribute(Qt.WidgetAttribute.WA_NativeWindow):
+            return
+        parent = host.parentWidget()
+        if parent is None or not host.isVisible():
+            return
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            user32 = ctypes.WinDLL("user32", use_last_error=True)
+            hwnd = int(host.winId())
+            dpr = host.devicePixelRatioF() or 1.0
+            off = host.mapTo(parent, QPoint(0, 0))
+            x = int(round(off.x() * dpr))
+            y = int(round(off.y() * dpr))
+            w = max(1, int(round(host.width() * dpr)))
+            h = max(1, int(round(host.height() * dpr)))
+            SWP_NOZORDER = 0x0004
+            SWP_NOACTIVATE = 0x0010
+            user32.SetWindowPos(wintypes.HWND(hwnd), 0, x, y, w, h,
+                                SWP_NOZORDER | SWP_NOACTIVATE)
+        except Exception:
+            # Never let a cosmetic fix break playback.
+            pass
+
     def showEvent(self, e):  # noqa: N802
         super().showEvent(e)
+        # Layout has not run yet at this point, so sync on the next tick.
+        QTimer.singleShot(0, self._sync_native_surface)
         if not self._player_ready:
             self._player_ready = True
             QTimer.singleShot(0, self._init_player)
@@ -407,6 +453,8 @@ class PlayerPage(QFrame):
         p.volumeChanged.connect(lambda v: self.vol.setValue(int(v)))
         p.set_volume(int(self.settings.get("volume", 80)))
         self._timer.start()
+        # mpv has now attached its child window; make sure it covers the stage.
+        self._sync_native_surface()
         if self._pending:
             self.load(self._pending[0], self._pending[1])
             self._pending = None

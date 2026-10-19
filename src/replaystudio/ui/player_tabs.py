@@ -21,7 +21,7 @@ import os
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (QFrame, QLabel, QStackedWidget, QTabBar,
-                               QVBoxLayout)
+                               QToolButton, QVBoxLayout)
 
 from ..core import diagnostics
 from . import theme as T
@@ -54,8 +54,15 @@ class PlayerTabs(QFrame):
 
         self.bar = QTabBar()
         self.bar.setExpanding(False)
-        self.bar.setMovable(True)
-        self.bar.setTabsClosable(True)
+        # NOT movable: `close_tab`/`_on_current_changed` address tabs by index,
+        # and the QStackedWidget body keeps its own insertion order. Dragging a
+        # tab would desynchronise the two and show the wrong player.
+        self.bar.setMovable(False)
+        # The built-in close button is drawn by the style and cannot be kept
+        # inside a rounded tab: it overflowed the corner (reported). We supply
+        # our own 18px button per tab instead, which Qt positions inside the
+        # tab rect by construction.
+        self.bar.setTabsClosable(False)
         self.bar.setElideMode(Qt.ElideRight)
         self.bar.setUsesScrollButtons(True)
         self.bar.setDrawBase(False)
@@ -70,10 +77,10 @@ class PlayerTabs(QFrame):
                 border-bottom: none;
                 border-top-left-radius: ${RADIUS}px;
                 border-top-right-radius: ${RADIUS}px;
-                padding: 6px 10px;
+                padding: 6px 9px 6px 11px;
                 margin-right: 4px;
                 margin-top: 4px;
-                max-width: 210px;
+                max-width: 220px;
                 font-size: 12px;
             }
             QTabBar::tab:selected {
@@ -82,9 +89,18 @@ class PlayerTabs(QFrame):
                 border-color: $ACCENT;
             }
             QTabBar::tab:hover:!selected { color: $TEXT; background: $CARD_HOVER; }
-            QTabBar::close-button:hover { background: $CLOSE_HOVER; border-radius: 3px; }
+            QToolButton#tabClose {
+                background: transparent;
+                border: none;
+                border-radius: 9px;
+                color: $TEXT_FAINT;
+                font-size: 11px;
+                font-weight: 700;
+                padding: 0px;
+            }
+            QToolButton#tabClose:hover { background: $CLOSE_HOVER; color: #FFFFFF; }
+            QToolButton#tabClose:pressed { background: $ACCENT; color: $ON_ACCENT; }
         """)
-        self.bar.tabCloseRequested.connect(self.close_tab)
         self.bar.currentChanged.connect(self._on_current_changed)
         root.addWidget(self.bar)
 
@@ -162,6 +178,8 @@ class PlayerTabs(QFrame):
         self.bar.blockSignals(True)
         tab_index = self.bar.addTab(self._title_for(row))
         self.bar.setTabToolTip(tab_index, row.get("path", ""))
+        self.bar.setTabButton(tab_index, QTabBar.ButtonPosition.RightSide,
+                              self._make_close_button(page))
         self.bar.setCurrentIndex(tab_index)
         self.bar.blockSignals(False)
         self.body.setCurrentWidget(page)
@@ -180,6 +198,23 @@ class PlayerTabs(QFrame):
             name = os.path.splitext(os.path.basename(row.get("path", "")))[0]
         name = name.strip() or "未命名"
         return name if len(name) <= 26 else name[:25] + "…"
+
+    def _make_close_button(self, page: PlayerPage) -> QToolButton:
+        """A fixed-size close button that Qt keeps inside the tab rect.
+
+        Bound to the *page*, not the tab index: closing the current tab shifts
+        every later index, and an index-bound slot would then close the wrong
+        one.
+        """
+        btn = QToolButton()
+        btn.setObjectName("tabClose")
+        btn.setText("✕")
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.setFixedSize(18, 18)
+        btn.setFocusPolicy(Qt.NoFocus)
+        btn.setToolTip("关闭该标签（Ctrl+W）")
+        btn.clicked.connect(lambda _=False, p=page: self.close_page(p))
+        return btn
 
     def _wire(self, page: PlayerPage):
         """Route one tab's signals outward — but only while it is focused.
@@ -297,8 +332,11 @@ class PlayerTabs(QFrame):
     def _park(page: PlayerPage):
         """Silence and freeze a background tab but keep its position.
 
-        Muting is not cosmetic: without it a background tab keeps feeding the
-        audio device, which is exactly the bug the user reported.
+        Muting alone is not enough. Two engines that both hold a real audio
+        *and* video output crash the process while the second one starts
+        (measured: 3 of 10 runs, access violation). So a parked tab also drops
+        its audio track, which makes mpv release the device — only the tab the
+        user is looking at ever owns one.
         """
         p = page.player
         if p is None:
@@ -307,6 +345,7 @@ class PlayerTabs(QFrame):
         page.parked_muted = p.muted
         p.set_paused(True)
         p.set_muted(True)
+        page.parked_aid = p.suspend_audio()
         page.stop_ticking()
 
     @staticmethod
@@ -315,6 +354,7 @@ class PlayerTabs(QFrame):
         if p is None:
             return
         p.set_muted(getattr(page, "parked_muted", False))
+        p.resume_audio(getattr(page, "parked_aid", ""))
         page.start_ticking()
         if getattr(page, "parked_playing", False):
             p.set_paused(False)

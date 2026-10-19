@@ -291,4 +291,5 @@ def _finish(results: list[bool] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    from replaystudio.core import diagnostics
+    diagnostics.hard_exit(main())

@@ -15,6 +15,10 @@ import sys
 
 from PySide6.QtCore import QObject, Signal
 
+from ..core import diagnostics
+
+_LOG_SEEN: dict[str, int] = {}
+
 _MPV_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.dirname(os.path.abspath(__file__))))), "vendor", "mpv")
 
@@ -81,6 +85,17 @@ class MpvPlayer(QObject):
             sub_auto="all",
             audio_file_auto="all",
             ytdl="no",
+            # Crackling ("锯齿感") on some clips before this: mpv's default
+            # audio buffer is only 0.2 s, so a single disk stall drains it and
+            # the output underruns. The ACLOS clips are ~35 Mbit/s and the first
+            # playback often overlaps thumbnail extraction, which makes those
+            # stalls likely. A larger buffer plus a demuxer cache for local
+            # files absorbs them. The cache is deliberately small: up to six
+            # tabs each hold their own engine.
+            audio_buffer=0.4,
+            cache="yes",
+            demuxer_max_bytes=32 * 1024 * 1024,
+            demuxer_max_back_bytes=8 * 1024 * 1024,
             log_handler=self._log,
         )
         if wid:
@@ -138,8 +153,32 @@ class MpvPlayer(QObject):
         return wrapper
     @staticmethod
     def _log(level, component, message):
+        """Route engine diagnostics somewhere a windowed build can find them.
+
+        stderr is invisible in a GUI launch, so mpv errors used to vanish. They
+        now land in the session log. Audio warnings are included on purpose:
+        "underrun" there is the only hard evidence of the crackling some clips
+        show, and without it the next report is as blind as the last one.
+        """
+        msg = (message or "").strip()
+        interesting = level in ("error", "fatal")
+        if not interesting and level == "warn":
+            low = f"{component} {msg}".lower()
+            interesting = ("underrun" in low or "ao/" in low or "wasapi" in low
+                           or "audio" in low)
+        if not interesting:
+            return
         if level in ("error", "fatal"):
-            sys.stderr.write(f"[mpv:{component}] {message}\n")
+            try:
+                sys.stderr.write(f"[mpv:{component}] {msg}\n")
+            except Exception:
+                pass
+        key = f"{level}|{component}|{msg[:120]}"
+        seen = _LOG_SEEN.get(key, 0) + 1
+        _LOG_SEEN[key] = seen
+        # Underruns come in bursts; log the first few, then summarise.
+        if seen <= 3 or seen % 50 == 0:
+            diagnostics.note(f"mpv[{level}] {component}: {msg} (x{seen})")
 
     # mpv event ids we care about (mpv_event_id enum)
     _EID_START_FILE = 6
@@ -324,6 +363,33 @@ class MpvPlayer(QObject):
     def set_muted(self, muted: bool):
         try:
             self._mpv.mute = bool(muted)
+        except Exception:
+            pass
+
+    def suspend_audio(self) -> str:
+        """Turn the audio track off and return the id that was playing.
+
+        Measured on this machine: two engines that each hold a real audio
+        output *and* a real video output crash the process (access violation,
+        3 of 10 runs) while the second one is starting up. A parked tab has no
+        reason to keep an audio device open — it is muted anyway — so we drop
+        the track entirely and let mpv release the AO. The id is restored on
+        resume, which keeps a manually chosen track intact.
+        """
+        aid = ""
+        try:
+            aid = str(self._mpv.aid or "")
+        except Exception:
+            pass
+        try:
+            self._mpv.aid = "no"
+        except Exception:
+            pass
+        return aid
+
+    def resume_audio(self, aid: str = ""):
+        try:
+            self._mpv.aid = aid or "auto"
         except Exception:
             pass
 

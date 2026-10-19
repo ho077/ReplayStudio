@@ -50,7 +50,11 @@ def main(argv: list[str] | None = None) -> int:
     if files:
         QTimer.singleShot(350, lambda: win.open_paths(files))
 
-    return app.exec()
+    code = app.exec()
+    # Do NOT return normally: libmpv's DLL detach segfaults once two engine
+    # lifetimes have existed (measured; see diagnostics.hard_exit). Everything
+    # worth persisting already is, so leave through the front door.
+    diagnostics.hard_exit(code)
 
 
 if __name__ == "__main__":

@@ -55,13 +55,15 @@ py -3.13 -m venv .venv
 ## 测试与验证
 
 ```powershell
-.venv\Scripts\python.exe tests\smoke_core.py        # 解析→索引→查询
-.venv\Scripts\python.exe tools\smoke_gui.py         # 导航/筛选/缩略图
-.venv\Scripts\python.exe tools\smoke_tabs.py        # 标签生命周期回归 21 项
-.venv\Scripts\python.exe tools\smoke_diagnostics.py # 崩溃日志捕获 3 项
-.venv\Scripts\python.exe tools\smoke_phase2.py      # 播放器功能 19 项
-.venv\Scripts\python.exe tools\smoke_containers.py  # 容器兼容 + 损坏容错 9 项
-.venv\Scripts\python.exe tools\smoke_playback.py    # 真实录像播放
+.venv\Scripts\python.exe tests\smoke_core.py            # 解析→索引→查询
+.venv\Scripts\python.exe tools\smoke_gui.py             # 导航/筛选/缩略图
+.venv\Scripts\python.exe tools\smoke_hidden_missing.py  # 缺失片段默认隐藏 11 项
+.venv\Scripts\python.exe tools\smoke_diagnostics.py     # 崩溃日志捕获 3 项
+.venv\Scripts\python.exe tools\smoke_tabs.py            # 标签/画面居中/关闭按钮 25 项
+.venv\Scripts\python.exe tools\smoke_exit.py            # 关闭应用不崩溃 2 项
+.venv\Scripts\python.exe tools\smoke_phase2.py          # 播放器功能 19 项
+.venv\Scripts\python.exe tools\smoke_containers.py      # 容器兼容 + 损坏容错 9 项
+.venv\Scripts\python.exe tools\smoke_playback.py        # 真实录像播放
 ```
 
 测试样本由 `tools/make_phase2_sample.py` 用 FFmpeg 现场合成到 `tests/_media/`，
@@ -79,7 +81,7 @@ py -3.13 -m venv .venv
 ## 文档
 
 - 架构与决策：`docs/architecture/`（`decision-001` 技术栈、`decision-002` 播放器模型）
-- 开发日志：`docs/devlog/`（000 立项 / 001 媒体库 / 002 主题 / 003 通用播放器 / 004 播放生命周期与崩溃日志）
+- 开发日志：`docs/devlog/`（000 立项 / 001 媒体库 / 002 主题 / 003 通用播放器 / 004 播放生命周期与崩溃日志 / 005 画面居中、隐藏已删片段与崩溃定因）
 - 学习文档：`docs/learning/`（含每篇三个动手任务）
 - 故障排查：`docs/troubleshooting/known-issues.md`
 - 当前状态与路线：`docs/project-status.md`、`docs/roadmap.md`

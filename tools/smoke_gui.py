@@ -89,10 +89,14 @@ def main():
 
 
 if __name__ == "__main__":
+    code = 0
     try:
         main()
     except Exception:
         lines.append("FAILED\n" + traceback.format_exc())
         print(traceback.format_exc(), flush=True)
+        code = 1
     with open(OUT, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
+    from replaystudio.core import diagnostics
+    diagnostics.hard_exit(code)

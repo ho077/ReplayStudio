@@ -33,10 +33,34 @@ os.makedirs(MEDIA, exist_ok=True)
 
 # Deliberately NOT offscreen: libmpv needs a real --wid window to open a video
 # output. A headless run silently fails to load anything.
-from PySide6.QtWidgets import QApplication  # noqa: E402
+from PySide6.QtWidgets import QApplication, QTabBar  # noqa: E402
 
 REPORT = os.path.join(ROOT, "tools", "_tabs.txt")
 log: list[str] = []
+
+
+def win_rect(hwnd: int) -> tuple[int, int, int, int]:
+    """(x, y, w, h) of a window in physical pixels."""
+    import ctypes
+    from ctypes import wintypes
+
+    r = wintypes.RECT()
+    ctypes.WinDLL("user32", use_last_error=True).GetWindowRect(
+        wintypes.HWND(hwnd), ctypes.byref(r))
+    return r.left, r.top, r.right - r.left, r.bottom - r.top
+
+
+def client_rect(hwnd: int) -> tuple[int, int, int, int]:
+    """Client origin (screen coords) + size of a window, physical pixels."""
+    import ctypes
+    from ctypes import wintypes
+
+    u = ctypes.WinDLL("user32", use_last_error=True)
+    pt = wintypes.POINT(0, 0)
+    u.ClientToScreen(wintypes.HWND(hwnd), ctypes.byref(pt))
+    r = wintypes.RECT()
+    u.GetClientRect(wintypes.HWND(hwnd), ctypes.byref(r))
+    return pt.x, pt.y, r.right, r.bottom
 
 
 def say(msg: str):
@@ -122,6 +146,60 @@ def main() -> int:
                          f"pos={page1.player.position:.2f}s"))
     results.append(check("标签标题取自视频名", "tab-a" in tabs.bar.tabText(0),
                          tabs.bar.tabText(0)))
+
+    # ------------------------------------- 1b mpv surface pinned to its host
+    # Reported: the *first* video was drawn off-centre. Root cause was the mpv
+    # host's native HWND sitting offset inside its parent, because Qt created it
+    # before layout settled. Invariant: the HWND rect must equal the parent's
+    # client rect exactly (offset 0,0, same size).
+    def surface_offsets() -> list[tuple[str, int, int, int, int]]:
+        out = []
+        for i, pg in enumerate(tabs.pages()):
+            host = pg.video_host
+            if not host.isVisible():
+                continue
+            hwnd = int(host.winId())
+            hx, hy = win_rect(hwnd)[:2]
+            px, py, pw, ph = client_rect(int(host.parentWidget().winId()))
+            hw, hh = win_rect(hwnd)[2:]
+            out.append((f"tab{i}", hx - px, hy - py, pw - hw, ph - hh))
+        return out
+
+    pump(app, 0.4)
+    offs = surface_offsets()
+    results.append(check("首个标签的画面窗口与舞台完全重合（不偏移）",
+                         bool(offs) and all(dx == 0 and dy == 0
+                                            for _n, dx, dy, _dw, _dh in offs),
+                         f"{offs}"))
+    results.append(check("画面窗口尺寸等于舞台客户区（不缩放/不裁切）",
+                         bool(offs) and all(dw == 0 and dh == 0
+                                            for _n, _dx, _dy, dw, dh in offs),
+                         f"{offs}"))
+
+    # Moving and resizing the window must not reintroduce the offset.
+    win.move(win.x() + 60, win.y() + 40)
+    win.resize(1180, 780)
+    pump(app, 0.8)
+    offs = surface_offsets()
+    results.append(check("移动/缩放窗口后画面窗口仍重合",
+                         bool(offs) and all(dx == 0 and dy == 0
+                                            for _n, dx, dy, _dw, _dh in offs),
+                         f"{offs}"))
+
+    # ------------------------------------- 1c close button inside its tab
+    # Reported: the ✕ badge overflowed the tab's rounded corner. We now place a
+    # fixed-size QToolButton; Qt must keep it inside the tab rect.
+    bad = []
+    for i in range(tabs.count()):
+        btn = tabs.bar.tabButton(i, QTabBar.RightSide)
+        if btn is None:
+            bad.append(f"tab{i}: no button")
+            continue
+        tr, br = tabs.bar.tabRect(i), btn.geometry()
+        if not tr.contains(br):
+            bad.append(f"tab{i}: tab={tr.getRect()} btn={br.getRect()}")
+    results.append(check("关闭按钮完全落在标签范围内（不越界）", not bad,
+                         "; ".join(bad) or "all inside"))
 
     # --------------------------------------------------------- 2 second tab
     engine1 = page1.player
@@ -212,6 +290,9 @@ def _dump(results: list[bool]):
 
 
 if __name__ == "__main__":
-    code = main()
+    _code = main()
     shutil.rmtree(TMP, ignore_errors=True)
-    raise SystemExit(code)
+    from replaystudio.core import diagnostics
+    # Six engines were created and destroyed here; libmpv faults during DLL
+    # detach, so leave the way the app does (see diagnostics.hard_exit).
+    diagnostics.hard_exit(_code)

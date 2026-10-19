@@ -248,6 +248,12 @@ class SettingsPage(QFrame):
         r3.addWidget(b_logs)
         r3.addStretch()
         l3.addLayout(r3)
+        self.cb_show_missing = QCheckBox("显示「源文件缺失」的片段")
+        self.cb_show_missing.setToolTip(
+            "关闭时（默认）已缺失的片段不会出现在任何列表里。\n"
+            "它们仍保留在索引中，文件回来后会自动恢复显示。")
+        self.cb_show_missing.toggled.connect(self._on_show_missing)
+        l3.addWidget(self.cb_show_missing)
         self.lbl_log = QLabel("")
         T.style(self.lbl_log, "color: $TEXT_FAINT; font-size: 11px;")
         self.lbl_log.setWordWrap(True)
@@ -269,6 +275,7 @@ class SettingsPage(QFrame):
         self.refresh_stats()
 
     recheckRequested = Signal()
+    listChanged = Signal()      # a filter/policy change: grids must reload
 
     # ------------------------------------------------------------------ helpers
     def _fill_engine_info(self):
@@ -289,6 +296,12 @@ class SettingsPage(QFrame):
     def _sync_theme_ui(self):
         for card in self.theme_cards:
             card.set_active(card.pal.key == T.current_key())
+
+    def _on_show_missing(self, on: bool):
+        self.settings["show_missing_files"] = 1 if on else 0
+        self.db.show_missing = bool(on)
+        self.refresh_stats()
+        self.listChanged.emit()
 
     # ------------------------------------------------------------ association
     def _sync_assoc(self):
@@ -343,7 +356,13 @@ class SettingsPage(QFrame):
         s = self.db.stats()
         self.lbl_stats.setText(
             f"对局 {s['matches']} 场 · 片段 {s['videos']} 个 · 事件 {s['events']} 条 · "
-            f"占用 {s['bytes']/1024**3:.1f} GB · 缺失 {s['missing']} 个")
+            f"占用 {s['bytes']/1024**3:.1f} GB"
+            + (f"　（另有 {s['missing']} 个源文件已缺失，默认不显示）"
+               if s["missing"] else ""))
+        self.cb_show_missing.blockSignals(True)
+        self.cb_show_missing.setChecked(bool(self.db.show_missing))
+        self.cb_show_missing.blockSignals(False)
+        self.cb_show_missing.setEnabled(s["missing"] > 0)
         cur = diagnostics.current_log()
         if cur is not None:
             self.lbl_log.setText(f"本次运行日志：{cur}")

@@ -41,6 +41,10 @@ class MainWindow(QMainWindow):
 
         self.db = Database()
         self.settings = Settings(self.db)
+        # Purged source files are hidden by default: the user deleted them, so
+        # listing them everywhere is just noise. `Database` keeps them in the
+        # index and only filters the listings.
+        self.db.show_missing = bool(int(self.settings.get("show_missing_files", 0) or 0))
         T.init_theme(None, self.settings.get("theme", T.DEFAULT_KEY))
         self.setStyleSheet(T.QSS)
         self.thumbs = ThumbnailService(self)
@@ -120,6 +124,7 @@ class MainWindow(QMainWindow):
         self.settings_page.rebuildRequested.connect(lambda: self.start_scan(True))
         self.settings_page.recheckRequested.connect(self.recheck_files)
         self.settings_page.dirChanged.connect(lambda _d: self.start_scan(False))
+        self.settings_page.listChanged.connect(self._reload_all_grids)
 
         self.player_tabs.positionReported.connect(self._record_position)
         self.player_tabs.fileDropped.connect(lambda p: self.open_paths([p]))
@@ -246,6 +251,17 @@ class MainWindow(QMainWindow):
         n = self.db.refresh_file_states()
         self.moments.reload()
         self.set_status(f"文件状态已刷新，{n} 个条目状态发生变化")
+
+    def _reload_all_grids(self):
+        """Visibility policy changed (e.g. show/hide missing clips)."""
+        for page in (self.moments, self.local, self.favorites, self.recent):
+            try:
+                if hasattr(page, "refresh_facets"):
+                    page.refresh_facets()
+                page.reload()
+            except Exception:
+                pass
+        self._refresh_sidebar_stats()
 
     # ----------------------------------------------------------------- playback
     def open_player(self, row: dict, context: list[dict] | None = None):
@@ -467,6 +483,7 @@ class MainWindow(QMainWindow):
         # Escape / 返回 both mean "close this playback tab", which also stops
         # the engine — closing the tab *is* stopping the video.
         add("Escape", lambda: page() and self.player_tabs.close_current())
+        add("Ctrl+W", lambda: page() and self.player_tabs.close_current())
         add("[", lambda: run(lambda pg: pg.player and pg.set_speed(max(0.25, pg.player.speed - 0.25))))
         add("]", lambda: run(lambda pg: pg.player and pg.set_speed(min(4.0, pg.player.speed + 0.25))))
         add("Ctrl+F", lambda: self.moments.search.setFocus())

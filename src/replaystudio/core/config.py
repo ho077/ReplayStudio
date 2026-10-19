@@ -16,6 +16,9 @@ DEFAULTS = {
     "autoplay_next": 1,      # continue to the next item in the context list
     "sub_delay": 0.0,        # applied to every newly loaded file
     "theme": "valorant",
+    # Clips whose source file no longer exists stay in the index but are hidden
+    # from every listing unless the user asks to see them.
+    "show_missing_files": 0,
 }
 
 

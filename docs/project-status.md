@@ -1,8 +1,27 @@
 # 项目状态
 
-更新：2026-10-19（Phase 1 + 主题系统 + Phase 2 通用播放器 + 播放生命周期重构与崩溃日志）
+更新：2026-10-19（Phase 1 + 主题系统 + Phase 2 通用播放器 + 播放生命周期重构 + 第三轮体验/稳定性修复）
 
 ## ✅ 已完成并通过验证
+
+### 第三轮：体验与稳定性修复（用户截图反馈驱动）
+- **首帧画面居中**：定位到 `video_host` 的原生 HWND 在创建时被定歪（实测偏 (283,145) px），
+  布局只改尺寸不纠位置。新增 `_sync_native_surface()` 用 `SetWindowPos` 钉住，
+  抓屏验证上下黑边 102/102 对称、水平偏差 0
+- **隐藏已删除的片段**：`Database.show_missing` 默认 False，`query_videos` / `recent` /
+  `facets` / `stats` 全部按可见口径；索引仍保留记录，文件回来自动恢复；
+  设置页可切回（11/11 测试）
+- **标签关闭按钮**：弃用不可控的 `QTabBar::close-button`，改自绘 18×18 `QToolButton`，
+  结构上不可能越界；同时修掉"拖动标签后按索引寻址会显示错页面"的隐患，补 `Ctrl+W`
+- **两个必崩缺陷（用户报的「自己退出了」）**：
+  1. 退出时 libmpv 在 DLL detach 阶段崩溃 → `diagnostics.hard_exit()` 用
+     `TerminateProcess` 跳过 detach 遍历
+  2. 两个引擎同时持有真实音频+视频输出时中途崩溃（3/10）→ 后台标签 park 时
+     释放音频设备（`aid=no`，回来恢复轨道）
+  修复前 5/5 崩溃，修复后连续 12/12 全过程干净退出
+- **音频**：`audio-buffer` 0.2s→0.4s + 本地 32 MiB demuxer 缓存（缓解欠载型毛刺）；
+  mpv 的 error 与音频告警开始写入 session 日志，便于下次取证
+- 截图证据：`docs/screenshots/phase3/`；过程记录：`docs/devlog/005-*.md`
 
 ### 播放生命周期重构（21/21 + 3/3 自动化验证）— 修复用户反馈的两个缺陷
 - **一视频一标签**：`ui/player_tabs.py`，每个标签持有独立 `PlayerPage` + 独立 `MpvPlayer`；
@@ -61,10 +80,12 @@
 
 ## ⚠️ 已知问题与风险
 
-- **用户报告的那次崩溃尚未 100% 定因**：两条高度可疑路径（`Signal source has been deleted`、
-  向隐藏窗口持续 d3d11va 渲染）都已消除，但当时没有日志。现已具备取证能力，
-  若复现请提供 `%LOCALAPPDATA%\ReplayStudio\logs\` 下最新的 `session-*.log` / `crash-*.log`
-- 435 个片段源文件已被官方客户端清理，显示"源文件缺失"（数据真实状态，非 Bug）
+- **「声音有锯齿感」尚未定因**：已把 `audio-buffer` 提到 0.4s、开本地 demuxer 缓存、
+  并消除多引擎同时占用音频设备；这三项都是有证据的缓解手段，但没有直接复现验证。
+  若仍出现，`logs/session-*.log` 里现在会记录 `underrun` 类音频告警
+- **崩溃的根因已修但过程值得记一笔**：libmpv 在 DLL detach 阶段与 `TerminateProcess`
+  规避，本质是"绕开"而非"修好上游"。若换 libmpv 版本，`tools/smoke_exit.py` 要重跑
+- 435 个片段源文件已被删除（用户主动删的），默认不再陈列；索引保留以便文件回来自动恢复
 - mpv 渲染在原生子窗口，`win.grab()` 抓不到画面（正常播放不受影响，截图里视频区是黑的）
 - 播放上下文是"打开时的快照"：播放中切筛选不会影响已在播的队列（设计如此，见 ADR-002）
 - 标签数上限 6（`MAX_TABS`）是经验值，未做显存压力测试
@@ -72,6 +93,17 @@
 - OBS 便携模式下的 NVENC/QSV 等编码器需在实际录制时逐个探测可用性
 
 ## 💡 本阶段最值得学习的三个技术点
+
+1. **"Qt 认为的位置"≠"原生窗口的位置"**（`player_page.py::_sync_native_surface`）：
+   带 `WA_NativeWindow` 的 QWidget 会在创建那一刻把 HWND 定在当时的几何上，
+   之后布局只改尺寸。首次打开偏位、切一下又正常，就是这个时间差的指纹。
+2. **`os._exit()` 并不等于"不跑 teardown"**（`diagnostics.hard_exit`）：
+   `_exit()` 仍走 `ExitProcess` → 遍历各 DLL 的 `DllMain(PROCESS_DETACH)`。
+   要真正跳过必须 `TerminateProcess`，且 ctypes 不声明 argtypes 会静默失败 —— 很坑。
+3. **"清理缺失记录"要清理三处口径**（`core/db.py`）：列表、筛选计数、统计。
+   只改列表会出现"筛选写着 12 条、网格只有 9 条"这种自相矛盾的界面。
+
+### 上一轮（播放生命周期）的三个技术点
 
 1. **"页面隐藏"不等于"播放停止"**（`ui/player_tabs.py`）：把播放从"页面状态"提升为
    "会话对象"，一个标签即一个会话。串音和可能的崩溃都是这个抽象缺失的连坐后果。
@@ -102,11 +134,23 @@ cd D:\WorkSpace\WorkBuddySpace\apps\ReplayStudio
 ## 🧪 如何验证
 
 ```powershell
-.venv\Scripts\python.exe tests\smoke_core.py        # 解析→索引→查询
-.venv\Scripts\python.exe tools\smoke_gui.py         # 导航/筛选/缩略图
-.venv\Scripts\python.exe tools\smoke_tabs.py        # 标签生命周期（串音/崩溃回归）21 项
-.venv\Scripts\python.exe tools\smoke_diagnostics.py # 崩溃日志捕获能力 3 项
-.venv\Scripts\python.exe tools\smoke_phase2.py      # 播放器全部功能 19 项
-.venv\Scripts\python.exe tools\smoke_containers.py  # 容器兼容 + 损坏容错 9 项
-.venv\Scripts\python.exe tools\smoke_playback.py    # 真实录像播放
+.venv\Scripts\python.exe tests\smoke_core.py            # 解析→索引→查询
+.venv\Scripts\python.exe tools\smoke_gui.py             # 导航/筛选/缩略图
+.venv\Scripts\python.exe tools\smoke_hidden_missing.py  # 缺失片段默认隐藏 11 项
+.venv\Scripts\python.exe tools\smoke_diagnostics.py     # 崩溃日志捕获能力 3 项
+.venv\Scripts\python.exe tools\smoke_tabs.py            # 标签生命周期/画面居中/关闭按钮 25 项
+.venv\Scripts\python.exe tools\smoke_exit.py            # 关闭应用不崩溃（真实 app.main）2 项
+.venv\Scripts\python.exe tools\smoke_phase2.py          # 播放器全部功能 19 项
+.venv\Scripts\python.exe tools\smoke_containers.py      # 容器兼容 + 损坏容错 9 项
+.venv\Scripts\python.exe tools\smoke_playback.py        # 真实录像播放
+```
+
+所有脚本都走与正式程序一致的退出路径，**退出码 0 本身也是断言**（此前退出即段错误）。
+
+定位问题时用的探针（不是回归测试，按需手动跑）：
+
+```powershell
+.venv\Scripts\python.exe tools\probe_video_rect.py     # mpv 窗口 vs Qt 控件几何
+.venv\Scripts\python.exe tools\probe_video_center.py   # 抓屏量画面黑边是否对称
+.venv\Scripts\python.exe tools\probe_audio.py          # 音频后端/缓冲/欠载
 ```

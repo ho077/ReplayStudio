@@ -6,6 +6,7 @@ __pycache__/
 *.pyc
 tests/_*.db*
 tools/_*.txt
+tools/_center/
 tests/_media/
 tests/_smoke_core.txt
 vendor/obs/

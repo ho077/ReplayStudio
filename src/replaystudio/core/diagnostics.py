@@ -157,3 +157,57 @@ def note(text: str):
 
 def current_log() -> Path | None:
     return _log_path
+
+
+def hard_exit(code: int = 0) -> None:
+    """End the process without running Python's shutdown sequence.
+
+    Why this is necessary
+    --------------------
+    libmpv keeps WASAPI/COM state in DLL-global storage that is released during
+    process detach. Measured on this machine: once *two* engine lifetimes have
+    happened (open -> play -> terminate, twice), the process segfaults inside
+    that detach — after all our code has finished and after the window has
+    already closed, so nothing in Python can catch it. The same run with
+    ``audio=no`` never crashes, which pins it on the audio stack rather than on
+    the video surface or the event threads.
+
+    Nothing we tried from Python helps: ``quit()`` plus a wait, joining the
+    event threads (python-mpv's ``terminate()`` already does), or a
+    ``gc.collect()`` and a drain before exiting. All still segfault. Leaving
+    through ``_exit()`` does not, and by the time we get here everything that
+    matters has already been persisted:
+
+    * diagnostics write and close the log file on every line;
+    * every engine is terminated in ``MainWindow.closeEvent``;
+    * the thumbnail thread pool is joined there too.
+
+    So the only thing skipped is Python tearing down objects we no longer need.
+    """
+    try:
+        if _log_path is not None:
+            with open(_log_path, "a", encoding="utf-8") as f:
+                f.write(f"{datetime.now():%H:%M:%S.%f}"[:-3] + "  === exit ===\n")
+    except OSError:
+        pass
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except Exception:
+            pass
+    if os.name == "nt":
+        # `os._exit` is not enough: _exit() still runs ExitProcess, which walks
+        # every loaded module's DllMain(PROCESS_DETACH) — and that is precisely
+        # where libmpv faults. TerminateProcess skips that walk, so the process
+        # ends without touching libmpv's global teardown.
+        try:
+            import ctypes
+
+            k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            k32.GetCurrentProcess.restype = ctypes.c_void_p
+            k32.TerminateProcess.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+            k32.TerminateProcess.restype = ctypes.c_int
+            k32.TerminateProcess(k32.GetCurrentProcess(), int(code) & 0xFFFFFFFF)
+        except Exception:
+            pass
+    os._exit(int(code))

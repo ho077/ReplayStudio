@@ -183,4 +183,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    from replaystudio.core import diagnostics
+    # Engines are created and destroyed many times here; leave the same way the
+    # app does (see diagnostics.hard_exit — libmpv faults during DLL detach).
+    diagnostics.hard_exit(main())
