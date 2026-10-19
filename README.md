@@ -6,18 +6,30 @@ Windows 11 本地视频管理 / 播放 / 录屏一体化桌面软件。
 
 - **无畏时刻** — 只读解析腾讯「无畏时刻」(ACLOS) 本地库，按地图/特工/模式/类型/胜负筛选回看
 - **本地视频** — 任意文件夹浏览、播放列表、字幕音轨、断点续播
-- **录屏工作台** — OBS + obs-websocket 集成（Phase 3，待 OBS 安装）
+- **录屏工作台** — OBS + obs-websocket 集成（Phase 3 进行中，已完成 OBS 便携版与 4455 端口验证）
 
 所有数据默认只留在本机，不上传任何视频或个人信息。
 
 ## 快速开始
 
+需要 Windows 11 + Python 3.13。
+
 ```powershell
-cd D:\WorkSpace\WorkBuddySpace\apps\ReplayStudio
+git clone https://github.com/ho077/ReplayStudio.git
+cd ReplayStudio
+
+py -3.13 -m venv .venv
+.venv\Scripts\pip install -r requirements.txt
+
+# 播放引擎：将 libmpv-2.dll 放到 vendor\mpv\ 下（见「依赖」）
 .venv\Scripts\python.exe run.py
 ```
 
+首次启动会自动扫描本机「无畏时刻」库并后台建索引，中断后再次启动可续扫。
+
 可选：把文件拖进窗口直接播放；或在设置页点「添加钮（打开方式）」后从资源管理器右键打开。
+
+> `vendor/` 下的二进制不进版本库（体积大且需自行接受许可），因此 clone 后必须手动补齐 libmpv，否则播放页会报「播放引擎不可用」。
 
 ## 当前能力
 
@@ -33,10 +45,10 @@ cd D:\WorkSpace\WorkBuddySpace\apps\ReplayStudio
 
 | 组件 | 位置 | 说明 |
 | --- | --- | --- |
-| Python 3.13 + PySide6 | `.venv/` | GUI 与播放页 |
-| libmpv | `vendor/mpv/libmpv-2.dll` | 播放引擎（LGPL/GPL 双许可，见 `docs/architecture/decisions/decision-001.md`） |
-| FFmpeg / ffprobe | 系统 PATH（Scoop） | 缩略图抽帧、测试样本生成 |
-| OBS Studio | 未安装 | Phase 3 录屏后端 |
+| Python 3.13 + PySide6 | `.venv/` | GUI 与播放页，见 `requirements.txt` |
+| libmpv | `vendor/mpv/libmpv-2.dll` | 播放引擎，**需自行下载**（LGPL/GPL 双许可，见 `docs/architecture/decisions/decision-001.md`）。取 `mpv-dev` 的 x86_64 包，解压后把 `libmpv-2.dll` 放进该目录 |
+| FFmpeg / ffprobe | 系统 PATH | 缩略图抽帧、测试样本生成 |
+| OBS Studio 32.2.2 便携版 | `vendor/obs/` | 录屏后端，同样不进版本库；`tools/probe_obs.py` 会以 `--portable` 启动并验证 obs-websocket 监听 127.0.0.1:4455 |
 
 ## 测试与验证
 
