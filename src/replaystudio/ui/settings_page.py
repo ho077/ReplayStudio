@@ -6,11 +6,13 @@ import shutil
 import subprocess
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import (QApplication, QComboBox, QFileDialog, QFrame,
-                               QGridLayout, QHBoxLayout, QLabel, QLineEdit,
-                               QMessageBox, QPushButton, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFileDialog,
+                               QFrame, QGridLayout, QHBoxLayout, QLabel,
+                               QLineEdit, QMessageBox, QPushButton, QScrollArea,
+                               QSpinBox, QVBoxLayout, QWidget)
 
 from ..aclos import reader
+from ..core import assoc
 from ..core.db import user_data_dir
 from ..media import thumbs
 from ..media.player import ensure_mpv_dll
@@ -79,7 +81,19 @@ class SettingsPage(QFrame):
         self.db = db
         self.settings = settings
 
-        root = QVBoxLayout(self)
+        # Settings keeps growing (Phase 2 added playback/association/shortcut
+        # cards), so the whole page scrolls instead of squeezing.
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        wrap = QWidget()
+        scroll.setWidget(wrap)
+        outer.addWidget(scroll)
+        self.scroll = scroll   # exposed so tests/screenshots can scroll to a card
+
+        root = QVBoxLayout(wrap)
         root.setContentsMargins(20, 18, 20, 18)
         root.setSpacing(14)
 
@@ -136,6 +150,78 @@ class SettingsPage(QFrame):
         l2.addWidget(self.lbl_engine)
         self._fill_engine_info()
         root.addWidget(c2)
+
+        # ---------------- playback behaviour
+        c6, l6 = _card("播放行为")
+        hints = QLabel("跳转间隔决定 ← / → 每次移动的秒数；Shift + 方向键使用长跳转。")
+        T.style(hints, "color: $TEXT_FAINT; font-size: 11.5px;")
+        l6.addWidget(hints)
+        r6 = QHBoxLayout()
+        r6.addWidget(QLabel("短跳转"))
+        self.sp_step = QSpinBox()
+        self.sp_step.setRange(1, 120)
+        self.sp_step.setSuffix(" 秒")
+        self.sp_step.setValue(int(settings.get("seek_step", 5)))
+        self.sp_step.valueChanged.connect(
+            lambda v: settings.__setitem__("seek_step", v))
+        r6.addWidget(self.sp_step)
+        r6.addSpacing(12)
+        r6.addWidget(QLabel("长跳转"))
+        self.sp_step_long = QSpinBox()
+        self.sp_step_long.setRange(5, 600)
+        self.sp_step_long.setSuffix(" 秒")
+        self.sp_step_long.setValue(int(settings.get("seek_step_long", 30)))
+        self.sp_step_long.valueChanged.connect(
+            lambda v: settings.__setitem__("seek_step_long", v))
+        r6.addWidget(self.sp_step_long)
+        r6.addStretch()
+        l6.addLayout(r6)
+
+        r6b = QHBoxLayout()
+        self.cb_autoplay = QCheckBox("播放结束后自动连播下一个")
+        self.cb_autoplay.setChecked(bool(int(settings.get("autoplay_next", 1))))
+        self.cb_autoplay.stateChanged.connect(
+            lambda v: settings.__setitem__("autoplay_next", 1 if v else 0))
+        r6b.addWidget(self.cb_autoplay)
+        self.cb_remember = QCheckBox("记住播放进度（断点续播）")
+        self.cb_remember.setChecked(bool(int(settings.get("remember_position", 1))))
+        self.cb_remember.stateChanged.connect(
+            lambda v: settings.__setitem__("remember_position", 1 if v else 0))
+        r6b.addWidget(self.cb_remember)
+        r6b.addStretch()
+        l6.addLayout(r6b)
+        root.addWidget(c6)
+
+        # ---------------- file association
+        c7, l7 = _card("文件关联")
+        self.lbl_assoc = QLabel("")
+        T.style(self.lbl_assoc, "color: $TEXT_DIM; font-size: 12px;")
+        self.lbl_assoc.setWordWrap(True)
+        l7.addWidget(self.lbl_assoc)
+        r7 = QHBoxLayout()
+        self.b_assoc = QPushButton("添加到「打开方式」")
+        self.b_assoc.setProperty("accent", "true")
+        self.b_assoc.clicked.connect(self._toggle_assoc)
+        r7.addWidget(self.b_assoc)
+        r7.addStretch()
+        l7.addLayout(r7)
+        note = QLabel("只写入当前用户的注册表（HKCU），不会夺走系统默认播放器，可随时撤销。")
+        T.style(note, "color: $TEXT_FAINT; font-size: 11.5px;")
+        l7.addWidget(note)
+        root.addWidget(c7)
+        self._sync_assoc()
+
+        # ---------------- keyboard
+        c8, l8 = _card("快捷键")
+        keys = QLabel(
+            "空格 播放/暂停　·　← → 跳转（Shift 长跳转）　·　↑ ↓ 音量\n"
+            "F 全屏　·　M 静音　·　S 截图　·　P / N 上一个 / 下一个\n"
+            "J 切换字幕（Shift+J 关闭）　·　K 切换音轨　·　A 画面比例\n"
+            "[ ] 倍速　·　Esc 返回　·　Ctrl+O 打开文件　·　Ctrl+F 搜索")
+        T.style(keys, "color: $TEXT_DIM; font-size: 12px; line-height: 175%;")
+        keys.setWordWrap(True)
+        l8.addWidget(keys)
+        root.addWidget(c8)
 
         # ---------------- index
         c3, l3 = _card("索引与缓存")
@@ -195,6 +281,22 @@ class SettingsPage(QFrame):
     def _sync_theme_ui(self):
         for card in self.theme_cards:
             card.set_active(card.pal.key == T.current_key())
+
+    # ------------------------------------------------------------ association
+    def _sync_assoc(self):
+        on = assoc.is_registered()
+        self.b_assoc.setText("移除「打开方式」关联" if on else "添加到「打开方式」")
+        self.lbl_assoc.setText(
+            "状态：" + ("已注册，可在资源管理器右键 → 打开方式中看到 ReplayStudio。"
+                        if on else "未注册。注册后可直接在资源管理器用 ReplayStudio 打开视频。"))
+
+    def _toggle_assoc(self):
+        ok, msg = assoc.unregister() if assoc.is_registered() else assoc.register()
+        self._sync_assoc()
+        if not ok:
+            QMessageBox.warning(self, "操作失败", msg)
+        else:
+            QMessageBox.information(self, "完成", msg)
 
     def _pick_dir(self):
         d = QFileDialog.getExistingDirectory(self, "选择 ACLOS WonderfulDb 目录",

@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 import sys
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication
 
@@ -35,6 +35,15 @@ def main(argv: list[str] | None = None) -> int:
 
     win = MainWindow()
     win.show()
+
+    # Command-line arguments: `run.py <file>` or Windows "open with" (%1).
+    # Deferred one tick so the window exists (and mpv has a window handle).
+    argv = list(argv or sys.argv)[1:]
+    files = [os.path.abspath(a) for a in argv
+             if a and not a.startswith("-") and os.path.isfile(a)]
+    if files:
+        QTimer.singleShot(350, lambda: win.open_paths(files))
+
     return app.exec()
 
 

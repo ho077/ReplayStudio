@@ -1,16 +1,36 @@
-"""Playback page shared by highlights, local videos and recordings."""
+"""Playback page shared by highlights, local videos and recordings.
+
+Layout
+------
+  header ── back / title / state
+  body   ── video stage (native mpv surface + overlay) │ side panel (tabs)
+  bar    ── timeline + transport controls
+
+The side panel switches between *info*, *events* and *playlist* so the same
+page serves a 12-second highlight (lots of events, one item) and a 45-minute
+episode (no events, twenty siblings) without wasting space.
+"""
 from __future__ import annotations
 
 import os
 
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath
-from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QPushButton,
-                               QSizePolicy, QSlider, QVBoxLayout, QWidget)
+from PySide6.QtGui import QColor, QFont, QPainter
+from PySide6.QtWidgets import (QFileDialog, QFrame, QHBoxLayout, QLabel,
+                               QListWidget, QListWidgetItem, QMenu,
+                               QPushButton, QScrollArea, QSizePolicy,
+                               QSlider, QStackedWidget, QVBoxLayout, QWidget)
 
 from ..media.player import MpvPlayer
 from . import theme as T
-from .widgets import human_time, timestamp_ms
+from .widgets import ChipButton, human_time, timestamp_ms
+
+SUB_EXTS = {".srt", ".ass", ".ssa", ".vtt", ".sub", ".idx", ".sup", ".lrc"}
+VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv", ".ts", ".m2ts",
+              ".wmv", ".mpg", ".mpeg", ".m4v", ".rmvb"}
+
+ASPECTS = [("原始比例（推荐）", "-1"), ("16:9", "16:9"), ("4:3", "4:3"),
+           ("拉伸填满窗口", "no"), ("2.35:1", "2.35:1"), ("1:1", "1:1")]
 
 
 class TimelineSlider(QWidget):
@@ -81,29 +101,24 @@ class TimelineSlider(QWidget):
         track_h = 4
         ratio = (self._value / self._maximum) if self._maximum else 0.0
 
-        # base track
         p.setPen(Qt.NoPen)
         p.setBrush(QColor(T.SURFACE_2))
         p.drawRoundedRect(0, track_y, w, track_h, 2, 2)
 
-        # played portion
         if ratio > 0:
             p.setBrush(QColor(T.ACCENT))
             p.drawRoundedRect(0, track_y, int(w * ratio), track_h, 2, 2)
 
-        # event markers
         for sec, kind in self.markers:
             if not self._maximum or sec < 0:
                 continue
             x = w * (sec / self._maximum)
             if x > w:
                 continue
-            color = QColor(T.ACCENT if kind == "kill" else T.DEATH)
-            p.setBrush(color)
+            p.setBrush(QColor(T.ACCENT if kind == "kill" else T.DEATH))
             p.setPen(Qt.NoPen)
             p.drawRoundedRect(int(x) - 1, track_y - 5, 2, track_h + 10, 1, 1)
 
-        # handle
         hx = int(w * ratio)
         hovered = self._hover_x >= 0
         r = 6 if hovered else 5
@@ -124,12 +139,14 @@ class TimelineSlider(QWidget):
 
 
 class PlayerPage(QFrame):
-    """Video surface + transport controls + event timeline + match metadata."""
+    """Video surface + transport controls + event timeline + playlist."""
 
     backRequested = Signal()
     prevRequested = Signal()
     nextRequested = Signal()
     positionReported = Signal(str, float, float)   # video_id, pos_s, duration_s
+    playlistIndexSelected = Signal(int)            # index into current context
+    fileDropped = Signal(str)                      # a video file dropped in
 
     def __init__(self, settings, parent=None):
         super().__init__(parent)
@@ -137,7 +154,10 @@ class PlayerPage(QFrame):
         self.player: MpvPlayer | None = None
         self._current: dict | None = None
         self._player_ready = False
-        self._user_seeking = False
+        self._fs = False
+        self._context: list[dict] = []
+        self._event_markers: list[tuple[float, str]] = []
+        self.setAcceptDrops(True)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -159,42 +179,99 @@ class PlayerPage(QFrame):
         head.addWidget(self.info_label)
         root.addLayout(head)
 
-        # ---- body: video + side panel
+        # ---- body: video stage + side panel
         body = QHBoxLayout()
         body.setContentsMargins(14, 0, 14, 0)
         body.setSpacing(12)
 
-        self.video_host = QWidget()
+        self.stage = QWidget()
+        self.stage.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.stage.setMinimumSize(480, 270)
+        stage_lay = QVBoxLayout(self.stage)
+        stage_lay.setContentsMargins(0, 0, 0, 0)
+        self.video_host = QWidget(self.stage)
         T.style(self.video_host, "background: #000; border-radius: ${RADIUS}px;")
-        self.video_host.setMinimumSize(480, 270)
-        self.video_host.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.video_host.setAttribute(Qt.WA_NativeWindow, True)
         self.video_host.setAttribute(Qt.WA_DontCreateNativeAncestors, True)
-        body.addWidget(self.video_host, 1)
+        stage_lay.addWidget(self.video_host)
+        # floating overlay (OSD toast + error panel), positioned in resizeEvent
+        self.overlay = QLabel(self.stage)
+        self.overlay.hide()
+        self.overlay.setAlignment(Qt.AlignCenter)
+        self.overlay.setWordWrap(True)
+        self.osd = QLabel(self.stage)
+        self.osd.hide()
+        self.osd.setAlignment(Qt.AlignHCenter | Qt.AlignBottom)
+        self._osd_timer = QTimer(self)
+        self._osd_timer.setSingleShot(True)
+        self._osd_timer.timeout.connect(self.osd.hide)
+        body.addWidget(self.stage, 1)
 
         side = QFrame()
         side.setObjectName("panel")
-        side.setFixedWidth(268)
+        side.setFixedWidth(276)
         sl = QVBoxLayout(side)
         sl.setContentsMargins(12, 12, 12, 12)
         sl.setSpacing(8)
-        self.meta_label = QLabel("对局信息")
-        T.style(self.meta_label, "color: $TEXT; font-weight: 600; font-size: 13px;")
-        sl.addWidget(self.meta_label)
+
+        tabs = QHBoxLayout()
+        tabs.setSpacing(6)
+        self.tab_info = ChipButton("信息", "info", self)
+        self.tab_events = ChipButton("事件", "events", self)
+        self.tab_list = ChipButton("列表", "list", self)
+        self._tabs = [self.tab_info, self.tab_events, self.tab_list]
+        for b in self._tabs:
+            b.setChecked(False)
+            b.clicked.connect(lambda _=False, v=b.value: self._switch_tab(v))
+            tabs.addWidget(b)
+        self.tab_info.setChecked(True)
+        sl.addLayout(tabs)
+
+        self.side_stack = QStackedWidget()
+        sl.addWidget(self.side_stack, 1)
+
+        # tab: info
+        info_wrap = QWidget()
+        il = QVBoxLayout(info_wrap)
+        il.setContentsMargins(0, 0, 0, 0)
         self.meta_body = QLabel("—")
         self.meta_body.setWordWrap(True)
+        self.meta_body.setTextInteractionFlags(Qt.TextSelectableByMouse)
         T.style(self.meta_body, "color: $TEXT_DIM; font-size: 12px; line-height: 150%;")
-        sl.addWidget(self.meta_body)
-        sl.addSpacing(6)
-        ev_title = QLabel("事件时间轴")
-        T.style(ev_title, "color: $TEXT; font-weight: 600; font-size: 13px;")
-        sl.addWidget(ev_title)
-        self.event_list = QWidget()
-        self.event_list.setLayout(QVBoxLayout())
-        self.event_list.layout().setContentsMargins(0, 0, 0, 0)
-        self.event_list.layout().setSpacing(3)
-        sl.addWidget(self.event_list, 1)
-        sl.addStretch()
+        il.addWidget(self.meta_body)
+        il.addStretch()
+        self.side_stack.addWidget(info_wrap)
+
+        # tab: events
+        ev_wrap = QWidget()
+        el = QVBoxLayout(ev_wrap)
+        el.setContentsMargins(0, 0, 0, 0)
+        self.event_list = QVBoxLayout()
+        self.event_list.setSpacing(3)
+        el.addLayout(self.event_list)
+        el.addStretch()
+        ev_scroll = QScrollArea()
+        ev_scroll.setWidgetResizable(True)
+        ev_scroll.setFrameShape(QFrame.NoFrame)
+        holder = QWidget()
+        holder.setLayout(el)
+        ev_scroll.setWidget(holder)
+        self.side_stack.addWidget(ev_scroll)
+
+        # tab: playlist
+        self.playlist = QListWidget()
+        self.playlist.setFrameShape(QFrame.NoFrame)
+        T.style(self.playlist, """
+            QListWidget { background: transparent; }
+            QListWidget::item { padding: 7px 9px; border-radius: 6px;
+                color: $TEXT_DIM; margin-bottom: 2px; }
+            QListWidget::item:selected { background: $ACCENT_SOFT; color: $TEXT; }
+            QListWidget::item:hover { background: $SURFACE_2; color: $TEXT; }
+        """)
+        self.playlist.itemClicked.connect(
+            lambda item: self.playlistIndexSelected.emit(int(item.data(Qt.UserRole))))
+        self.side_stack.addWidget(self.playlist)
+
         body.addWidget(side)
         root.addLayout(body, 1)
 
@@ -210,16 +287,18 @@ class PlayerPage(QFrame):
         bl.addWidget(self.timeline)
 
         row = QHBoxLayout()
-        row.setSpacing(8)
+        row.setSpacing(6)
         self.btn_play = QPushButton("⏸")
         self.btn_play.setFixedSize(38, 34)
         self.btn_play.clicked.connect(self.toggle_play)
         row.addWidget(self.btn_play)
 
-        for text, cb in (("⏮", self.prevRequested.emit), ("⏭", self.nextRequested.emit)):
+        for text, cb, tip in (("⏮", self.prevRequested.emit, "上一个（P）"),
+                              ("⏭", self.nextRequested.emit, "下一个（N）")):
             b = QPushButton(text)
             b.setFixedSize(34, 32)
             b.setProperty("flat", "true")
+            b.setToolTip(tip)
             b.clicked.connect(cb)
             row.addWidget(b)
 
@@ -229,30 +308,52 @@ class PlayerPage(QFrame):
         row.addWidget(self.time_label)
         row.addStretch()
 
+        self.btn_sub = QPushButton("CC")
+        self.btn_sub.setFixedSize(40, 30)
+        self.btn_sub.setToolTip("字幕轨道（J 切换 / Shift+J 关闭；可拖入 .srt/.ass）")
+        self.btn_sub.clicked.connect(self._menu_sub)
+        row.addWidget(self.btn_sub)
+
+        self.btn_audio = QPushButton("♪")
+        self.btn_audio.setFixedSize(34, 30)
+        self.btn_audio.setToolTip("音轨切换（K）")
+        self.btn_audio.clicked.connect(self._menu_audio)
+        row.addWidget(self.btn_audio)
+
+        self.btn_aspect = QPushButton("▣")
+        self.btn_aspect.setFixedSize(34, 30)
+        self.btn_aspect.setToolTip("画面比例（A）")
+        self.btn_aspect.clicked.connect(self._menu_aspect)
+        row.addWidget(self.btn_aspect)
+
+        shot = QPushButton("📷")
+        shot.setFixedSize(34, 30)
+        shot.setToolTip("截图（S）")
+        shot.clicked.connect(self.take_screenshot)
+        row.addWidget(shot)
+
         self.speed_btn = QPushButton("1.0×")
         self.speed_btn.setFixedSize(58, 30)
-        self.speed_btn.setToolTip("播放速度（快捷键 [ / ]）")
+        self.speed_btn.setToolTip("播放速度（[ / ]）")
         self.speed_btn.clicked.connect(self._cycle_speed)
         row.addWidget(self.speed_btn)
 
-        mute = QPushButton("🔊")
-        mute.setFixedSize(34, 30)
-        mute.setProperty("flat", "true")
-        mute.clicked.connect(self._toggle_mute)
-        row.addWidget(mute)
-        self.mute_btn = mute
+        self.mute_btn = QPushButton("🔊")
+        self.mute_btn.setFixedSize(34, 30)
+        self.mute_btn.setToolTip("静音（M）")
+        self.mute_btn.clicked.connect(self._toggle_mute)
+        row.addWidget(self.mute_btn)
 
         self.vol = QSlider(Qt.Horizontal)
         self.vol.setRange(0, 130)
         self.vol.setValue(80)
-        self.vol.setFixedWidth(88)
+        self.vol.setFixedWidth(78)
         self.vol.valueChanged.connect(self._on_volume)
         row.addWidget(self.vol)
 
         full = QPushButton("⛶")
         full.setFixedSize(34, 30)
-        full.setProperty("flat", "true")
-        full.setToolTip("全屏（F）")
+        full.setToolTip("全屏（F / 双击画面）")
         full.clicked.connect(self.toggle_fullscreen)
         row.addWidget(full)
         bl.addLayout(row)
@@ -263,6 +364,15 @@ class PlayerPage(QFrame):
         self._timer.timeout.connect(self._tick)
 
     # -------------------------------------------------------------- lifecycle
+    def resizeEvent(self, e):  # noqa: N802
+        super().resizeEvent(e)
+        self._place_overlays()
+
+    def _place_overlays(self):
+        w, h = self.stage.width(), self.stage.height()
+        self.overlay.setGeometry(0, 0, w, h)
+        self.osd.setGeometry(0, h - 70, w, 34)
+
     def showEvent(self, e):  # noqa: N802
         super().showEvent(e)
         if not self._player_ready:
@@ -274,6 +384,7 @@ class PlayerPage(QFrame):
             wid = int(self.video_host.winId())
             self.player = MpvPlayer(wid=wid, hwdec=self.settings.get("hwdec", "auto"))
         except Exception as exc:
+            self._show_overlay(f"播放引擎不可用\n{exc}")
             self.info_label.setText(f"播放引擎不可用：{exc}")
             return
         p = self.player
@@ -282,6 +393,9 @@ class PlayerPage(QFrame):
         p.pausedChanged.connect(self._on_paused)
         p.ended.connect(self._on_ended)
         p.errorOccurred.connect(self._on_error)
+        p.tracksChanged.connect(self._on_tracks)
+        p.osdText.connect(self.show_osd)
+        p.fileLoaded.connect(lambda _p: self._on_file_loaded())
         p.volumeChanged.connect(lambda v: self.vol.setValue(int(v)))
         p.set_volume(int(self.settings.get("volume", 80)))
         self._timer.start()
@@ -291,6 +405,7 @@ class PlayerPage(QFrame):
 
     _pending = None
 
+    # ---------------------------------------------------------------- loading
     def load(self, row: dict, start_pos: float | None = None):
         """Open one indexed video row."""
         self._current = row
@@ -300,15 +415,66 @@ class PlayerPage(QFrame):
         self.info_label.setText(" · ".join(parts))
         self._render_meta(row)
         self._render_events(row.get("video_id", ""))
+        self._mark_playlist_current(row.get("video_id", ""))
+        self.overlay.hide()
 
         if not self.player:
             self._pending = (row, start_pos)
             return
         if row.get("file_state") == 2 or not os.path.isfile(row.get("path", "")):
-            self._on_error("源文件不存在或已被移动。请重新扫描，或在列表中确认状态。")
+            self._on_error("源文件不存在或已被移动。\n请重新扫描，或在列表中确认状态。")
             return
         self.player.play(row["path"], start_pos)
         self.btn_play.setText("⏸")
+
+    def _on_file_loaded(self):
+        """Re-apply per-file preferences that mpv resets on every load."""
+        if not self.player:
+            return
+        try:
+            self.player.set_sub_delay(float(self.settings.get("sub_delay", 0.0)))
+        except (TypeError, ValueError):
+            pass
+        self._on_tracks()
+
+    # ------------------------------------------------------------- side panel
+    def _switch_tab(self, value):
+        idx = {"info": 0, "events": 1, "list": 2}[value]
+        self.side_stack.setCurrentIndex(idx)
+        for b in self._tabs:
+            b.setChecked(b.value == value)
+
+    def set_context(self, rows: list[dict], current_id: str = ""):
+        """Fill the playlist tab with the list the user came from."""
+        self._context = list(rows)
+        self.playlist.blockSignals(True)
+        self.playlist.clear()
+        for i, r in enumerate(rows):
+            name = r.get("vname") or os.path.basename(r.get("path", ""))
+            item = QListWidgetItem(name)
+            item.setData(Qt.UserRole, i)
+            item.setToolTip(r.get("path", ""))
+            if r.get("file_state") == 2:
+                item.setText(name + "  （已缺失）")
+                item.setForeground(QColor(T.TEXT_FAINT))
+            self.playlist.addItem(item)
+        self.playlist.blockSignals(False)
+        self._mark_playlist_current(current_id)
+        n = len(rows)
+        self.tab_list.setText(f"列表 {n}" if n else "列表")
+        if n > 1:
+            self.tab_list.setToolTip(f"当前播放上下文共 {n} 项")
+
+    def _mark_playlist_current(self, video_id: str):
+        if not video_id:
+            return
+        for i, r in enumerate(self._context):
+            if r.get("video_id") == video_id:
+                self.playlist.blockSignals(True)
+                self.playlist.setCurrentRow(i)
+                self.playlist.blockSignals(False)
+                self.playlist.scrollToItem(self.playlist.item(i))
+                return
 
     def _render_meta(self, row: dict):
         lines = []
@@ -326,16 +492,14 @@ class PlayerPage(QFrame):
                          f"  {row.get('rounds_won','-')}:{row.get('rounds_lost','-')}")
         if row.get("created_ms"):
             lines.append(f"录制：{timestamp_ms(row['created_ms'])}")
-        if row.get("duration_ms"):
-            lines.append(f"时长：{human_time(row['duration_ms']/1000.0)}")
-        if row.get("width"):
-            lines.append(f"分辨率：{row['width']}x{row['height']}  {int(row.get('fps',0))}fps")
+        if row.get("size_bytes"):
+            lines.append(f"大小：{row['size_bytes']/1024/1024:.1f} MB")
         if row.get("path"):
             lines.append(f"\n{row['path']}")
         self.meta_body.setText("\n".join(lines) if lines else "—")
 
     def _render_events(self, video_id: str):
-        lay = self.event_list.layout()
+        lay = self.event_list
         while lay.count():
             item = lay.takeAt(0)
             if item.widget():
@@ -343,13 +507,14 @@ class PlayerPage(QFrame):
         self._event_markers = []
         if not video_id or not hasattr(self, "_db"):
             self.timeline.set_markers([])
+            self.tab_events.setText("事件")
             return
-        for ev in self._db.get_events(video_id):
+        events = self.db_events(video_id)
+        for ev in events:
             sec = ev["ms"] / 1000.0
             self._event_markers.append((sec, ev["etype"]))
             b = QPushButton(f"{human_time(sec)}  {self._event_text(ev)}")
             b.setCursor(Qt.PointingHandCursor)
-            color = T.ACCENT if ev["etype"] == "kill" else T.DEATH
             T.style(b, """
                 QPushButton { background: transparent; border: none; text-align: left;
                     color: $TEXT_DIM; padding: 5px 8px; border-radius: 6px; font-size: 12px; }
@@ -359,6 +524,15 @@ class PlayerPage(QFrame):
             lay.addWidget(b)
         lay.addStretch()
         self.timeline.set_markers(self._event_markers)
+        self.tab_events.setText(f"事件 {len(events)}" if events else "事件")
+
+    def db_events(self, video_id: str):
+        if not hasattr(self, "_db"):
+            return []
+        try:
+            return self._db.get_events(video_id)
+        except Exception:
+            return []
 
     @staticmethod
     def _event_text(ev: dict) -> str:
@@ -371,6 +545,116 @@ class PlayerPage(QFrame):
 
     def set_db(self, db):
         self._db = db
+
+    # ------------------------------------------------------------ track menus
+    # Menus are split into "build" (pure widget construction, unit-testable and
+    # screenshot-able) and "show" (blocking exec at the button). Keeping them
+    # apart is what lets tools/screenshot_phase2.py render a menu without a
+    # live event loop driving a popup grab.
+    def _new_menu(self) -> QMenu:
+        menu = QMenu(self)
+        T.style(menu, """
+            QMenu { background: $SURFACE; border: 1px solid $BORDER; padding: 5px;
+                    color: $TEXT; }
+            QMenu::item { padding: 6px 22px; border-radius: 5px; }
+            QMenu::item:selected { background: $ACCENT; color: $ON_ACCENT; }
+        """)
+        return menu
+
+    def _over_button(self, btn: QPushButton, menu: QMenu):
+        pos = btn.mapToGlobal(btn.rect().bottomLeft())
+        menu.exec(pos)
+
+    def _build_sub_menu(self) -> QMenu | None:
+        if not self.player:
+            return None
+        menu = self._new_menu()
+        act_off = menu.addAction("关闭字幕")
+        act_off.triggered.connect(lambda: self.player.select_subtitle(None))
+        subs = self.player.subtitle_tracks()
+        cur = self.player.current_subtitle()
+        for t in subs:
+            label = f"#{t['id']}  {t.get('title') or t.get('lang') or '字幕'}"
+            a = menu.addAction(label)
+            a.setCheckable(True)
+            a.setChecked(t["id"] == cur)
+            a.triggered.connect(lambda _=False, i=t["id"]: self.player.select_subtitle(i))
+        menu.addSeparator()
+        a_load = menu.addAction("加载外部字幕文件 …")
+        a_load.triggered.connect(self._pick_subtitle)
+        menu.addSeparator()
+        d = float(self.player.sub_delay)
+        for delta, label in ((-0.5, "字幕提前 0.5s"), (0.5, "字幕延后 0.5s"),
+                             (0.0, f"重置延迟（当前 {d:+.1f}s）")):
+            a = menu.addAction(label)
+            a.triggered.connect(
+                lambda _=False, v=(0.0 if delta == 0.0 else d + delta): self._set_sub_delay(v))
+        return menu
+
+    def _build_audio_menu(self) -> QMenu | None:
+        if not self.player:
+            return None
+        menu = self._new_menu()
+        cur = self.player.current_audio()
+        for t in self.player.audio_tracks():
+            bits = [t.get("title") or "", t.get("lang") or "",
+                    f"{t.get('audio-channels', '')}ch" if t.get("audio-channels") else "",
+                    t.get("codec") or ""]
+            label = f"#{t['id']}  " + " · ".join(x for x in bits if x)
+            a = menu.addAction(label)
+            a.setCheckable(True)
+            a.setChecked(t["id"] == cur)
+            a.triggered.connect(lambda _=False, i=t["id"]: self.player.select_audio(i))
+        return menu
+
+    def _build_aspect_menu(self) -> QMenu | None:
+        if not self.player:
+            return None
+        menu = self._new_menu()
+        for label, value in ASPECTS:
+            a = menu.addAction(label)
+            a.triggered.connect(lambda _=False, v=value: self.player.set_aspect(v))
+        return menu
+
+    def _menu_sub(self):
+        menu = self._build_sub_menu()
+        if menu:
+            self._over_button(self.btn_sub, menu)
+
+    def _menu_audio(self):
+        menu = self._build_audio_menu()
+        if menu:
+            self._over_button(self.btn_audio, menu)
+
+    def _menu_aspect(self):
+        menu = self._build_aspect_menu()
+        if menu:
+            self._over_button(self.btn_aspect, menu)
+
+    def _pick_subtitle(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择字幕文件", "",
+            "字幕文件 (*.srt *.ass *.ssa *.vtt *.sub *.idx);;所有文件 (*.*)")
+        if path:
+            self.player.add_subtitle(path)
+            self.show_osd(f"已加载字幕：{os.path.basename(path)}")
+
+    def _set_sub_delay(self, v: float):
+        self.player.set_sub_delay(v)
+        self.settings["sub_delay"] = v
+
+    def _on_tracks(self):
+        """Reflect track availability on the buttons so dead controls never lie."""
+        if not self.player:
+            return
+        subs = self.player.subtitle_tracks()
+        auds = self.player.audio_tracks()
+        self.btn_sub.setEnabled(bool(subs))
+        self.btn_audio.setEnabled(len(auds) > 1)
+        self.btn_sub.setText("CC" if subs else "CC̶")
+        n_show = self.player.current_subtitle()
+        self.btn_sub.setToolTip(
+            f"字幕：{len(subs)} 条轨道" + (f"，当前 #{n_show}" if n_show else "（已关闭）"))
 
     # ---------------------------------------------------------------- controls
     def toggle_play(self):
@@ -385,10 +669,38 @@ class PlayerPage(QFrame):
         if self.player:
             self.player.seek_relative(delta)
 
+    def step_seconds(self) -> int:
+        try:
+            return int(self.settings.get("seek_step", 5))
+        except (TypeError, ValueError):
+            return 5
+
     def toggle_fullscreen(self):
+        if not self.player:
+            return
+        self._fs = not self._fs
+        self.player.set_fullscreen(self._fs)
+        self.show_osd("全屏" if self._fs else "退出全屏")
+
+    def take_screenshot(self):
+        if not self.player:
+            return
+        base = os.path.join(os.path.expanduser("~"), "Pictures", "ReplayStudio")
+        os.makedirs(base, exist_ok=True)
+        name = os.path.splitext(os.path.basename(self.player.path or "frame"))[0]
+        out = os.path.join(base, f"{name}_{int(self.player.position*1000)}.png")
+        if self.player.screenshot(out):
+            self.show_osd(f"截图已保存：{out}")
+        else:
+            self.show_osd("截图失败")
+
+    def cycle_subtitle(self, forward: bool = True):
         if self.player:
-            self.player.set_fullscreen(not getattr(self, "_fs", False))
-            self._fs = not getattr(self, "_fs", False)
+            self.player.cycle_subtitle(forward)
+
+    def cycle_audio(self, forward: bool = True):
+        if self.player:
+            self.player.cycle_audio(forward)
 
     def _cycle_speed(self):
         if not self.player:
@@ -402,6 +714,13 @@ class PlayerPage(QFrame):
                 break
         self.player.set_speed(nxt)
         self.speed_btn.setText(f"{nxt}×")
+
+    def set_speed(self, value: float):
+        if not self.player:
+            return
+        self.player.set_speed(value)
+        self.speed_btn.setText(f"{self.player.speed:g}×")
+        self.show_osd(f"{self.player.speed:g}× 速度", 900)
 
     def _toggle_mute(self):
         if self.player:
@@ -419,7 +738,28 @@ class PlayerPage(QFrame):
     def _tick(self):
         if self.player and self._current:
             pos = self.player.position
-            self.positionReported.emit(self._current.get("video_id", ""), pos, self.player.duration)
+            self.positionReported.emit(self._current.get("video_id", ""), pos,
+                                       self.player.duration)
+
+    # ---------------------------------------------------------------- overlays
+    def show_osd(self, text: str, ms: int = 1600):
+        self.osd.setText(text)
+        T.style(self.osd,
+                "background: rgba(0,0,0,170); color: $TEXT; border-radius: 6px;"
+                " padding: 6px 14px; font-size: 12.5px;")
+        self.osd.adjustSize()
+        self.osd.setGeometry(0, self.stage.height() - 70, self.stage.width(),
+                             self.osd.sizeHint().height())
+        self.osd.show()
+        self._osd_timer.start(ms)
+
+    def _show_overlay(self, text: str):
+        self.overlay.setText(text)
+        T.style(self.overlay,
+                "background: rgba(12,12,16,215); color: $TEXT_DIM; font-size: 13px;"
+                " border-radius: ${RADIUS}px; padding: 24px;")
+        self.overlay.show()
+        self.overlay.raise_()
 
     # ------------------------------------------------------------------ slots
     def _on_position(self, pos: float):
@@ -440,14 +780,41 @@ class PlayerPage(QFrame):
 
     def _on_ended(self):
         self.btn_play.setText("▶")
+        if int(self.settings.get("autoplay_next", 1)):
+            self.nextRequested.emit()
 
     def _on_error(self, msg: str):
         T.style(self.info_label, "color: $AMBER; font-size: 12px;")
-        self.info_label.setText(msg)
+        self.info_label.setText(msg.replace("\n", " "))
         self.btn_play.setText("▶")
+        self._show_overlay(msg)
 
     def clear_error(self):
         T.style(self.info_label, "color: $TEXT_DIM; font-size: 12px;")
+        self.overlay.hide()
+
+    # ------------------------------------------------------------- drag & drop
+    def dragEnterEvent(self, e):  # noqa: N802
+        if e.mimeData().hasUrls():
+            e.acceptProposedAction()
+
+    def dragMoveEvent(self, e):  # noqa: N802
+        if e.mimeData().hasUrls():
+            e.acceptProposedAction()
+
+    def dropEvent(self, e):  # noqa: N802
+        for url in e.mimeData().urls():
+            path = url.toLocalFile()
+            if not path:
+                continue
+            ext = os.path.splitext(path)[1].lower()
+            if ext in SUB_EXTS:
+                if self.player:
+                    self.player.add_subtitle(path)
+                    self.show_osd(f"已挂载字幕：{os.path.basename(path)}")
+            elif ext in VIDEO_EXTS:
+                self.fileDropped.emit(path)
+        e.acceptProposedAction()
 
     def shutdown(self):
         self._timer.stop()

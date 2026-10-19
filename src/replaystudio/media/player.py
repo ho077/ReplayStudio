@@ -34,11 +34,17 @@ def ensure_mpv_dll(extra_dir: str | None = None) -> str:
     raise RuntimeError(f"未找到 libmpv-2.dll，请确认 {_MPV_DIR} 存在")
 
 
+# mpv's MPV_ERROR_* codes are negative; we key them by absolute value.
 ERROR_TEXT = {
-    1: "加载失败：文件不存在、已损坏，或编码/封装格式不受支持。",
-    2: "格式无法识别。",
-    3: "不支持的媒体类型。",
-    4: "解码失败（缺少解码器或数据损坏）。",
+    12: "播放命令执行失败。",
+    13: "加载失败：文件不存在、已损坏，或编码/封装格式不受支持。",
+    14: "无法初始化音频输出设备（检查默认播放设备是否被占用）。",
+    15: "无法初始化视频输出（尝试在设置中切换硬件解码方式）。",
+    16: "没有可播放的内容。",
+    17: "无法识别的格式：文件不是视频，或文件头已损坏。",
+    18: "不支持的媒体类型或编码。",
+    19: "该功能未实现（通常是缺少对应解码器）。",
+    20: "未知错误，请查看日志。",
 }
 
 
@@ -56,6 +62,8 @@ class MpvPlayer(QObject):
     speedChanged = Signal(float)
     tracksChanged = Signal()
     hwdecChanged = Signal(str)
+    aspectDetected = Signal(float)
+    osdText = Signal(str)
 
     def __init__(self, wid: int | None = None, hwdec: str = "auto", parent=None):
         super().__init__(parent)
@@ -81,6 +89,11 @@ class MpvPlayer(QObject):
         self._wid = wid
         self._path = ""
         self._muted = False
+        # EOF can arrive through two independent channels (the `end-file`
+        # event and the `eof-reached` property observer). Without a latch both
+        # would fire `ended` for the same clip and auto-play would skip one
+        # video. The latch is cleared every time a new file is loaded.
+        self._ended_fired = False
 
         self._mpv.observe_property("time-pos", self._on_time_pos)
         self._mpv.observe_property("duration", self._on_duration)
@@ -90,6 +103,11 @@ class MpvPlayer(QObject):
         self._mpv.observe_property("speed", self._on_speed)
         self._mpv.observe_property("path", self._on_path)
         self._mpv.observe_property("hwdec-current", self._on_hwdec)
+        self._mpv.observe_property("track-list", self._on_track_list)
+        # `keep_open=always` pauses on the last frame and never sends end-file,
+        # so EOF is detected through this property instead (autoplay depends on it).
+        self._mpv.observe_property("eof-reached", self._on_eof)
+        self._mpv.observe_property("video-params/aspect", self._on_aspect_prop)
         self._mpv.register_event_callback(self._on_event)
 
     # ------------------------------------------------------------- plumbing
@@ -98,25 +116,43 @@ class MpvPlayer(QObject):
         if level in ("error", "fatal"):
             sys.stderr.write(f"[mpv:{component}] {message}\n")
 
+    # mpv event ids we care about (mpv_event_id enum)
+    _EID_START_FILE = 6
+    _EID_END_FILE = 7
+    _EID_FILE_LOADED = 8
+
+    def _event_id(self, event) -> int:
+        """python-mpv hands us a ctypes `MpvEvent`, whose id field is
+        `event_id` (a c_int) — plain `event.id` silently returns None, which is
+        exactly how the whole handler used to be dead code."""
+        eid = getattr(event, "event_id", None)
+        if eid is not None:
+            try:
+                return int(eid.value)
+            except AttributeError:
+                return int(eid)
+        return int(getattr(event, "id", -1) or -1)
+
     def _on_event(self, event):
         try:
-            eid = getattr(event, "id", None)
-            names = getattr(event, "name", "") or ""
-            if "end-file" in str(names) or eid == 7:
+            eid = self._event_id(event)
+            if eid == self._EID_END_FILE:
                 data = getattr(event, "data", None)
-                reason = getattr(data, "reason", None)
-                err = getattr(data, "error", None)
-                if err:
-                    try:
-                        err = int(err)
-                    except (TypeError, ValueError):
-                        pass
-                    msg = ERROR_TEXT.get(err if isinstance(err, int) else -1,
-                                         f"mpv 报告错误：{err}")
+                reason = int(getattr(data, "reason", 0) or 0)
+                err = getattr(data, "error", 0) or 0
+                try:
+                    err = int(err)
+                except (TypeError, ValueError):
+                    err = 0
+                # reason 4 == MPV_END_FILE_REASON_ERROR; mpv codes are negative
+                if reason == 4 or err < 0:
+                    code = abs(err)
+                    msg = ERROR_TEXT.get(code, f"mpv 报告错误（代码 {err}）")
                     self.errorOccurred.emit(msg)
-                else:
-                    self.ended.emit()
-            elif "file-loaded" in str(names) or eid == 6:
+                elif reason in (0, 1):     # eof / restarted
+                    self._emit_ended()
+            elif eid == self._EID_FILE_LOADED:
+                self._ended_fired = False
                 self.fileLoaded.emit(self._path)
                 self.tracksChanged.emit()
         except Exception:
@@ -152,14 +188,41 @@ class MpvPlayer(QObject):
     def _on_hwdec(self, _name, value):
         self.hwdecChanged.emit(str(value or "no"))
 
+    def _on_track_list(self, _name, _value):
+        self.tracksChanged.emit()
+
+    def _on_eof(self, _name, value):
+        if value:
+            self._emit_ended()
+
+    def _emit_ended(self):
+        """Fire `ended` at most once per loaded file (see `_ended_fired`)."""
+        if self._ended_fired:
+            return
+        self._ended_fired = True
+        self.ended.emit()
+
+    def _on_aspect_prop(self, _name, value):
+        if value:
+            try:
+                self.aspectDetected.emit(float(value))
+            except (TypeError, ValueError):
+                pass
+
     # -------------------------------------------------------------- controls
     def play(self, path: str, start_pos: float | None = None):
         """Load and play. Optionally resume at `start_pos` seconds."""
         self._path = path
+        self._ended_fired = False
         try:
             # `start` is applied to the next loaded file — no race with loadfile.
             self._mpv.start = f"{float(start_pos)}" if start_pos else "none"
             self._mpv.play(path)
+            # With `keep_open=always`, mpv sets `pause=yes` when a clip reaches
+            # its end and KEEPS that state for the next loadfile. Without this
+            # reset, auto-play would open the next video frozen on its first
+            # frame and never advance — the user sees "自动连播没反应".
+            self._mpv.pause = False
         except Exception as exc:
             self.errorOccurred.emit(f"无法播放 {os.path.basename(path)}：{exc}")
 
@@ -282,12 +345,125 @@ class MpvPlayer(QObject):
         except Exception:
             pass
 
+    def cycle_subtitle(self, forward: bool = True):
+        """Step through subtitle tracks (… → off → track1 → track2 → …)."""
+        subs = self.subtitle_tracks()
+        if not subs:
+            self.osdText.emit("无字幕轨道")
+            return
+        cur = self.current_subtitle()
+        ids = [t["id"] for t in subs]
+        try:
+            i = ids.index(cur)
+        except ValueError:
+            i = -1 if cur else len(ids) - 1
+        nxt = i + (1 if forward else -1)
+        if nxt >= len(ids):
+            self.select_subtitle(None)
+            self.osdText.emit("字幕：关闭")
+        elif nxt < -1:
+            self.select_subtitle(ids[-1])
+        else:
+            tid = ids[nxt]
+            self.select_subtitle(tid)
+            self.osdText.emit(f"字幕：{self._track_label(tid)}")
+        self.tracksChanged.emit()
+
+    def cycle_audio(self, forward: bool = True):
+        auds = self.audio_tracks()
+        if len(auds) < 2:
+            self.osdText.emit("仅有一条音轨")
+            return
+        ids = [t["id"] for t in auds]
+        cur = self.current_audio()
+        try:
+            i = ids.index(cur)
+        except ValueError:
+            i = 0
+        tid = ids[(i + (1 if forward else -1)) % len(ids)]
+        self.select_audio(tid)
+        self.osdText.emit(f"音轨：{self._track_label(tid)}")
+        self.tracksChanged.emit()
+
+    def _track_label(self, track_id) -> str:
+        for t in self.tracks:
+            if t.get("id") == track_id:
+                title = t.get("title") or ""
+                lang = t.get("lang") or ""
+                return f"#{track_id} {title or lang}".strip()
+        return f"#{track_id}"
+
+    def current_audio(self):
+        try:
+            v = self._mpv.aid
+            return None if v in (None, False, "no") else int(v)
+        except Exception:
+            return None
+
+    def current_subtitle(self):
+        try:
+            v = self._mpv.sid
+            return None if v in (None, False, "no") else int(v)
+        except Exception:
+            return None
+
     def add_subtitle(self, path: str):
         try:
             self._mpv.command("sub-add", path, "select")
             self.tracksChanged.emit()
         except Exception as exc:
             self.errorOccurred.emit(f"字幕加载失败：{exc}")
+
+    # ------------------------------------------------------- subtitle geometry
+    @property
+    def sub_delay(self) -> float:
+        try:
+            return float(self._mpv.sub_delay or 0.0)
+        except Exception:
+            return 0.0
+
+    def set_sub_delay(self, seconds: float):
+        try:
+            self._mpv.sub_delay = float(seconds)
+            self.osdText.emit(f"字幕延迟 {seconds:+.1f}s")
+        except Exception:
+            pass
+
+    @property
+    def audio_delay(self) -> float:
+        try:
+            return float(self._mpv.audio_delay or 0.0)
+        except Exception:
+            return 0.0
+
+    def set_audio_delay(self, seconds: float):
+        try:
+            self._mpv.audio_delay = float(seconds)
+            self.osdText.emit(f"音轨延迟 {seconds:+.1f}s")
+        except Exception:
+            pass
+
+    def set_sub_visible(self, visible: bool):
+        try:
+            self._mpv.sub_visibility = bool(visible)
+        except Exception:
+            pass
+
+    def set_sub_scale(self, scale: float):
+        try:
+            self._mpv.sub_scale = float(scale)
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------ aspect
+    def set_aspect(self, value: str):
+        """`value` is '-1' (auto/source), 'no' (fit window) or e.g. '16:9'."""
+        try:
+            self._mpv.video_aspect_override = value
+            label = {"-1": "原始比例", "no": "拉伸填满"}.get(value, value)
+            self.osdText.emit(f"画面比例：{label}")
+        except Exception:
+            pass
 
     def set_fullscreen(self, on: bool):
         try:

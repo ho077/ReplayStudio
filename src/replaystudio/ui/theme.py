@@ -10,7 +10,7 @@ Adding a theme = adding one Palette. No other file changes.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass, replace
 from string import Template
 
 
@@ -183,17 +183,17 @@ QSS = ""
 
 def _publish(p: Palette):
     global _current, QSS
+    # Normalize the one translucent slot to Qt's #AARRGGBB *before* anything
+    # reads the palette — `T.style()` renders from `asdict(_current)`, so a
+    # web-style value here would leak into every inline template.
+    soft = p.ACCENT_SOFT
+    if len(soft) == 9 and soft.startswith("#"):
+        p = replace(p, ACCENT_SOFT=f"#{soft[7:9]}{soft[1:7]}")
     _current = p
     for k, v in asdict(p).items():
         if k in ("key", "name", "desc"):
             continue
         globals()[k] = v
-    # Qt QSS expects #AARRGGBB (alpha first), palettes are written web-style
-    # #RRGGBBAA — convert so translucent tints render as intended.
-    for k in ("ACCENT_SOFT",):
-        c = globals()[k]
-        if len(c) == 9 and c.startswith("#"):
-            globals()[k] = f"#{c[7:9]}{c[1:7]}"
     QSS = build_qss(p)
 
 
@@ -232,11 +232,10 @@ def current_key() -> str:
 
 
 def build_qss(p: Palette) -> str:
-    d = asdict(p)
-    c = d["ACCENT_SOFT"]
-    if len(c) == 9 and c.startswith("#"):
-        d["ACCENT_SOFT"] = f"#{c[7:9]}{c[1:7]}"
-    return Template(_QSS_TEMPLATE).substitute(**d)
+    # `p` is already normalized by _publish (ACCENT_SOFT in #AARRGGBB order) —
+    # converting here a second time would rotate the bytes again (#20FF4655 →
+    # #5520FF46, i.e. opaque green), which is exactly the bug the nav bar had.
+    return Template(_QSS_TEMPLATE).substitute(**asdict(p))
 
 
 def apply_theme(app, key: str):

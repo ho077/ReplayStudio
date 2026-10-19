@@ -10,6 +10,12 @@ DEFAULTS = {
     "speed": 1.0,
     "remember_position": 1,
     "thumb_width": 300,
+    # Phase 2: playback behaviour
+    "seek_step": 5,          # ← / →  single jump, seconds
+    "seek_step_long": 30,    # Shift + ← / →
+    "autoplay_next": 1,      # continue to the next item in the context list
+    "sub_delay": 0.0,        # applied to every newly loaded file
+    "theme": "valorant",
 }
 
 

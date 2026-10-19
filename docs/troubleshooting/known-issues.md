@@ -25,9 +25,22 @@
 `loadfile` 后立刻 `seek` 有竞态；现用 `start` 选项。若再遇 -12，检查是否在
 file-loaded 之前就发命令。
 
+### 自动连播不触发 / 跳过一部 / 卡在第一帧（已修复，留档）
+三个坑叠在一起，都在 `media/player.py`：
+
+1. `keep_open=always` 下播完**不发 `end-file`**，要用 `eof-reached` 属性判断结束。
+2. 但 `end-file`(reason=eof) 在某些路径也会发 → 两条通道都 emit `ended` → 连播跳过一个。
+   现在用 `_ended_fired` 闩锁（每次 `play()` / `file-loaded` 复位）。
+3. `keep_open` 会在片尾把 `pause` 置 true 并**被下一个 loadfile 继承** →
+   下一部视频加载后停在第一帧。`play()` 里显式 `self._mpv.pause = False`。
+
 ### 截图工具抓不到视频画面
 mpv 渲染在原生子窗口（`wid`），`win.grab()` 抓不到其内容——播放本身正常，
-看时间轴走动即可确认。
+看时间轴走动即可确认。文档截图里的黑色视频区就是这个原因。
+
+### 「打开方式」里没有 ReplayStudio
+设置页点一次「添加钮（打开方式）」。它只写 `HKCU\Software\Classes`，
+若之前被安全软件清理过需要重新注册；点「移除」可完全撤销。
 
 ## Qt/PySide6 类（踩坑留档）
 
@@ -35,3 +48,10 @@ mpv 渲染在原生子窗口（`wid`），`win.grab()` 抓不到其内容——�
   传错会在后台线程抛 AttributeError 被吞掉。一律用枚举：
   `Qt.AspectRatioMode.KeepAspectRatio`。
 - `QPainter` 没有 `setClipped()`，是 `setClipping(False)`。
+- **QSS 的 8 位十六进制是 `#AARRGGBB`（alpha 在前）**。写 Web 风格 `#RRGGBBAA`
+  会被解析成一个不透明且色相错误的颜色（曾经的"选中项显示成橄榄绿"就是这个）。
+- **给信号 `connect` 一个裸 lambda 可能被 GC 回收**，槽静默失效、时灵时不灵。
+  测试或长生命周期连接要持有函数引用。
+- `QMenu.exec()` 是阻塞的。要自动化截图/测试菜单，把"构建菜单"和"弹出菜单"拆成两个方法，
+  单独 `menu.ensurePolished(); menu.adjustSize(); menu.grab()`。
+

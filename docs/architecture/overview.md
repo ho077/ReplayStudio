@@ -6,8 +6,8 @@
 │  main_window ── 导航/热键/页面编排                                                  │
 │  ├── moments_page   无畏时刻：六维筛选 + 搜索 + 虚拟化网格                           │
 │  ├── local_page     本地视频：文件夹浏览 + 播放列表                                 │
-│  ├── player_page    播放器：mpv 画面 + 事件时间轴 + 传输控制（所有模块共用）          │
-│  ├── settings_page  设置：数据源 / 硬解 / 索引维护                                  │
+│  ├── player_page    播放器：mpv 画面 + 事件时间轴 + 播放列表 + 字幕/音轨菜单（共用）  │
+│  ├── settings_page  设置：主题 / 数据源 / 硬解 / 播放行为 / 文件关联 / 索引维护        │
 │  ├── grid.py        VideoGridView（Qt model/view 虚拟化，1471 项与 24 项同开销）    │
 │  └── widgets/theme  深色 Fluent 主题、标题栏、侧边栏、卡片委托                       │
 ├───────────────────────────────────────────────────────────────────────────────────┤
@@ -16,6 +16,7 @@
 │  media/thumbs.py   缩略图管线：ACLOS 封面 → FFmpeg 抽帧 → 磁盘缓存，QThreadPool 懒加载 │
 │  core/scanner.py   ACLOS 增量扫描器（后台线程，按 mtime+size 判变化）                │
 │  core/local_scanner.py  本地视频扫描（复用 videos 表，source='local'）              │
+│  core/assoc.py     HKCU「打开方式」注册/撤销（不抢系统默认播放器）                    │
 ├───────────────────────────────────────────────────────────────────────────────────┤
 │  数据层                                                                            │
 │  aclos/crypto.py   hex → AES-256-CBC（key = SHA256(openid)），只读                  │
@@ -31,8 +32,11 @@
 2. `MomentsPage.refresh()` → `db.query_videos(filter)` → `grid.set_rows(rows)`。
 3. 每张卡片绘制时向 model 要 `DecorationRole` → 没有 pixmap 就向 `ThumbnailService`
    请求 → 后台线程生成 → `done` 信号 → 单卡片 `dataChanged` 重绘。
-4. 双击卡片 → `main_window.open_player(row)` → `PlayerPage.load(row)` →
+4. 双击卡片 → `main_window.open_player(row, context)` → `PlayerPage.load(row)` →
    `MpvPlayer.play(path)`（`start` 选项承载续播位置）。
+   `context` 是当前视图行的快照，决定播放列表与自动连播的范围（见 ADR-002）。
+5. 播完 → `MpvPlayer.ended`（`eof-reached` 属性触发，带一次性闩锁）→
+   `PlayerPage.nextRequested` → `main_window.step(+1)` → 播下一条或停止。
 
 ## 设计原则
 

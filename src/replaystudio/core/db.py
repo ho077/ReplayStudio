@@ -354,6 +354,17 @@ class Database:
                              WHERE v.video_id=?""", (video_id,)).fetchone()
             return dict(r) if r else None
 
+    def get_video_by_path(self, path: str):
+        """Look up an indexed row by absolute path (used for drag&drop / argv)."""
+        with self.conn() as c:
+            r = c.execute("""SELECT v.*, m.map_cn, m.agent_cn, m.mode_cn, m.kills, m.deaths,
+                             m.assists, m.has_won, m.start_ms, m.end_ms, a.nick, a.tag
+                             FROM videos v
+                             LEFT JOIN matches m ON m.match_id=v.match_id
+                             LEFT JOIN accounts a ON a.openid=v.openid
+                             WHERE v.path=?""", (path,)).fetchone()
+            return dict(r) if r else None
+
     # ------------------------------------------------------------- tags/fav/hist
     def set_tags(self, video_id: str, tags):
         with self.conn() as c:

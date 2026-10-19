@@ -8,19 +8,21 @@ import time
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QShortcut, QKeySequence
 from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QInputDialog,
-                               QLabel, QMainWindow, QProgressBar, QPushButton,
+                               QLabel, QMainWindow, QMessageBox,
+                               QProgressBar, QPushButton,
                                QSizeGrip, QStackedWidget, QVBoxLayout, QWidget)
 
 from ..aclos import reader
 from ..core.config import Settings
 from ..core.db import Database
+from ..core.local_scanner import VIDEO_EXTS, video_id_for
 from ..core.scanner import ScanWorker
 from ..media.thumbs import ThumbnailService
 from . import theme as T
 from .local_page import LocalPage
 from .moments_page import MomentsPage
 from .pages import RecordPage, SimpleGridPage
-from .player_page import PlayerPage
+from .player_page import SUB_EXTS, PlayerPage
 from .settings_page import SettingsPage
 from .widgets import Sidebar, TitleBar
 
@@ -33,6 +35,7 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(1180, 720)
         self.resize(1440, 900)
         self.setStyleSheet(T.QSS)
+        self.setAcceptDrops(True)
 
         self.db = Database()
         self.settings = Settings(self.db)
@@ -121,6 +124,8 @@ class MainWindow(QMainWindow):
         self.player_page.prevRequested.connect(lambda: self.step(-1))
         self.player_page.nextRequested.connect(lambda: self.step(1))
         self.player_page.positionReported.connect(self._record_position)
+        self.player_page.playlistIndexSelected.connect(self.play_index)
+        self.player_page.fileDropped.connect(lambda p: self.open_paths([p]))
 
         self._nav_before_player = "moments"
 
@@ -213,34 +218,131 @@ class MainWindow(QMainWindow):
         self.set_status(f"文件状态已刷新，{n} 个条目状态发生变化")
 
     # ----------------------------------------------------------------- playback
-    def open_player(self, row: dict):
+    def open_player(self, row: dict, context: list[dict] | None = None):
+        """Play `row`; `context` (defaults to the visible grid) feeds the playlist."""
         source_page = self.stack.currentWidget()
-        if source_page is not self.player_page:
-            if hasattr(source_page, "rows"):
-                self._play_context = list(source_page.rows())
+        if context is not None:
+            self._play_context = list(context)
+        elif source_page is not self.player_page and hasattr(source_page, "rows"):
+            self._play_context = list(source_page.rows())
         start = 0.0
         if int(self.settings.get("remember_position", 1)):
             start = self.db.last_position(row.get("video_id", "")) or 0.0
         self.player_page.clear_error()
         self.stack.setCurrentWidget(self.player_page)
+        if self._play_context:
+            self.player_page.set_context(self._play_context, row.get("video_id", ""))
         self.player_page.load(row, start)
 
-    def step(self, delta: int):
-        if not self._play_context:
+    def play_index(self, index: int):
+        """Playback requested straight from the playlist tab."""
+        if not (0 <= index < len(self._play_context)):
             return
+        self.player_page.clear_error()
+        self.player_page.load(self._play_context[index], 0.0)
+
+    def step(self, delta: int) -> bool:
+        """Previous/next inside the current context. Returns False at the ends
+        so the caller can stop auto-play instead of looping forever."""
+        if not self._play_context:
+            return False
         cur = self.player_page._current
         if not cur:
-            return
+            return False
         vid = cur.get("video_id")
         idx = next((i for i, r in enumerate(self._play_context)
                     if r.get("video_id") == vid), -1)
         if idx < 0:
-            return
+            return False
         nxt = idx + delta
-        if 0 <= nxt < len(self._play_context):
-            row = self._play_context[nxt]
-            self.player_page.clear_error()
-            self.player_page.load(row, 0.0)
+        if not (0 <= nxt < len(self._play_context)):
+            return False
+        row = self._play_context[nxt]
+        self.player_page.clear_error()
+        self.player_page.load(row, 0.0)
+        return True
+
+    # ------------------------------------------------------- external files
+    def make_row(self, path: str) -> dict:
+        """Build a playable row for a file that may not be indexed yet.
+
+        Indexed files keep their rich metadata; anything else gets a lightweight
+        ad-hoc row so drag&drop / "open with" works before any scanning.
+        """
+        row = self.db.get_video_by_path(path)
+        if row:
+            return row
+        try:
+            st = os.stat(path)
+            size, mtime = st.st_size, st.st_mtime
+        except OSError:
+            size, mtime = 0, 0.0
+        return {
+            "video_id": video_id_for(path),
+            "path": path,
+            "vname": os.path.splitext(os.path.basename(path))[0],
+            "vtype": "外部文件",
+            "source": "local",
+            "size_bytes": size,
+            "created_ms": int(mtime * 1000),
+            "file_state": 1,
+        }
+
+    def open_paths(self, paths: list[str], add_to_library: bool = False):
+        """Open one or more files dropped / passed on the command line."""
+        ok = [p for p in paths if os.path.isfile(p)
+              and os.path.splitext(p)[1].lower() in VIDEO_EXTS]
+        if not ok:
+            self.set_status("没有可播放的视频文件")
+            return
+        rows = [self.make_row(p) for p in ok]
+        if add_to_library:
+            for p in ok:
+                self.db.add_root(os.path.dirname(p), "local")
+        self.open_player(rows[0], context=rows)
+        self.set_status(f"已打开 {len(rows)} 个文件" + ("（已加入本地库）" if add_to_library else ""))
+
+    # ------------------------------------------------------------ drag & drop
+    def dragEnterEvent(self, e):  # noqa: N802
+        if e.mimeData().hasUrls():
+            e.acceptProposedAction()
+
+    def dragMoveEvent(self, e):  # noqa: N802
+        if e.mimeData().hasUrls():
+            e.acceptProposedAction()
+
+    def dropEvent(self, e):  # noqa: N802
+        files: list[str] = []
+        dirs: list[str] = []
+        for url in e.mimeData().urls():
+            p = url.toLocalFile()
+            if not p:
+                continue
+            (dirs if os.path.isdir(p) else files).append(p)
+        e.acceptProposedAction()
+
+        vids = [p for p in files if os.path.splitext(p)[1].lower() in VIDEO_EXTS]
+        subs = [p for p in files if os.path.splitext(p)[1].lower() in SUB_EXTS]
+
+        if vids:
+            self.open_paths(vids)
+        elif subs and self.player_page.player:
+            for s in subs:
+                self.player_page.player.add_subtitle(s)
+            self.player_page.show_osd(f"已挂载 {len(subs)} 个字幕文件")
+
+        if dirs:
+            d = dirs[0]
+            ans = QMessageBox.question(
+                self, "添加文件夹",
+                f"是否把「{d}」加入本地视频库？\n\n"
+                "仅建立索引，不会移动、复制或转码任何文件。",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+            if ans == QMessageBox.Yes:
+                self.db.add_root(d, "local")
+                self.local.refresh_roots()
+                self.local._scan()
+                self.set_status(f"已添加文件夹并开始扫描：{d}")
 
     def _record_position(self, video_id: str, pos: float, duration: float):
         if not video_id or duration <= 0:
@@ -285,23 +387,52 @@ class MainWindow(QMainWindow):
             sc = QShortcut(QKeySequence(key), self)
             sc.activated.connect(fn)
 
-        add("Space", lambda: self.player_page.toggle_play()
-            if self.stack.currentWidget() is self.player_page else None)
-        add("Right", lambda: self.player_page.seek_relative(5)
-            if self.stack.currentWidget() is self.player_page else None)
-        add("Left", lambda: self.player_page.seek_relative(-5)
-            if self.stack.currentWidget() is self.player_page else None)
+        def on_player() -> bool:
+            return self.stack.currentWidget() is self.player_page
+
+        def seek(direction: int, long_jump: bool = False):
+            if not on_player():
+                return
+            key = "seek_step_long" if long_jump else "seek_step"
+            try:
+                step = abs(int(self.settings.get(key, 5)))
+            except (TypeError, ValueError):
+                step = 5
+            self.player_page.seek_relative(direction * step)
+            self.player_page.show_osd(f"{direction*step:+d}s", 900)
+
+        add("Space", lambda: self.player_page.toggle_play() if on_player() else None)
+        add("Right", lambda: seek(1))
+        add("Left", lambda: seek(-1))
+        add("Shift+Right", lambda: seek(1, True))
+        add("Shift+Left", lambda: seek(-1, True))
         add("Up", lambda: self._volume_step(5))
         add("Down", lambda: self._volume_step(-5))
-        add("F", lambda: self.player_page.toggle_fullscreen()
-            if self.stack.currentWidget() is self.player_page else None)
-        add("Escape", lambda: self.navigate(self._nav_before_player)
-            if self.stack.currentWidget() is self.player_page else None)
+        add("F", lambda: self.player_page.toggle_fullscreen() if on_player() else None)
+        add("M", lambda: self.player_page._toggle_mute() if on_player() else None)
+        add("S", lambda: self.player_page.take_screenshot() if on_player() else None)
+        add("J", lambda: self.player_page.cycle_subtitle(True) if on_player() else None)
+        add("Shift+J", lambda: self.player_page.player.select_subtitle(None)
+            if on_player() and self.player_page.player else None)
+        add("K", lambda: self.player_page.cycle_audio(True) if on_player() else None)
+        add("A", lambda: self.player_page._menu_aspect() if on_player() else None)
+        add("P", lambda: self.step(-1) if on_player() else None)
+        add("N", lambda: self.step(1) if on_player() else None)
+        add("Escape", lambda: self.navigate(self._nav_before_player) if on_player() else None)
         add("[", lambda: self.player_page.set_speed(max(0.25, self.player_page.player.speed - 0.25))
-            if self.stack.currentWidget() is self.player_page and self.player_page.player else None)
+            if on_player() and self.player_page.player else None)
         add("]", lambda: self.player_page.set_speed(min(4.0, self.player_page.player.speed + 0.25))
-            if self.stack.currentWidget() is self.player_page and self.player_page.player else None)
+            if on_player() and self.player_page.player else None)
         add("Ctrl+F", lambda: self.moments.search.setFocus())
+        add("Ctrl+O", lambda: self._open_file_dialog())
+
+    def _open_file_dialog(self):
+        from PySide6.QtWidgets import QFileDialog
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "打开视频文件", "",
+            "视频文件 (*.mp4 *.mkv *.mov *.avi *.webm *.flv *.wmv *.m4v *.ts);;所有文件 (*.*)")
+        if paths:
+            self.open_paths(paths)
 
     def _volume_step(self, delta: int):
         if self.stack.currentWidget() is not self.player_page:
