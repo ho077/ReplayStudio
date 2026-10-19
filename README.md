@@ -18,12 +18,33 @@ Windows 11 本地视频管理 / 播放 / 录屏一体化桌面软件。
 git clone https://github.com/ho077/ReplayStudio.git
 cd ReplayStudio
 
+# 1) 只跑一次：建 .venv、装依赖、检查 vendor\
+setup.bat
+
+# 2) 之后双击即可
+start.bat
+```
+
+命令行等价写法（想自己控制时用）：
+
+```powershell
 py -3.13 -m venv .venv
 .venv\Scripts\pip install -r requirements.txt
 
 # 播放引擎：将 libmpv-2.dll 放到 vendor\mpv\ 下（见「依赖」）
 .venv\Scripts\python.exe run.py
 ```
+
+> 上一行也可以换成双击 `debug.bat`：保留控制台、退出后不关窗口，
+> 出问题时能直接看到 traceback 和退出码含义。
+
+| 脚本 | 用途 |
+| --- | --- |
+| `setup.bat` | 环境准备，只跑一次：找 Python → 建 `.venv` → 装依赖 → 检查 `vendor\` |
+| `start.bat` | 日常启动（`pythonw`，不留控制台窗口）；参数会转交给程序，可直接「打开方式」调用 |
+| `debug.bat` | 调试启动（保留控制台，退出后暂停，解释退出码含义）。闪退、白屏时用它 |
+
+> 三个 `.bat` 是 GBK + CRLF 编码（cmd 的要求），仓库里有 `.gitattributes` 保证换行不被转换。
 
 首次启动会自动扫描本机「无畏时刻」库并后台建索引，中断后再次启动可续扫。
 
@@ -41,7 +62,7 @@ py -3.13 -m venv .venv
 | 主题 | 六套无畏契约特工配色，设置页即时切换并持久化 |
 | 多标签播放 | 一个视频一个标签，关闭标签即销毁引擎；后台标签自动暂停并静音 |
 | 崩溃取证 | 启动即写 `%LOCALAPPDATA%\ReplayStudio\logs\`，设置页可一键打开日志目录 |
-| 系统集成 | 拖放打开、HKCU「打开方式」注册（可撤销） |
+| 系统集成 | 拖放打开、HKCU「打开方式」注册（可撤销）、`start.bat` / `debug.bat` 启动与取证入口 |
 
 ## 依赖
 
@@ -85,6 +106,7 @@ py -3.13 -m venv .venv
 - 学习文档：`docs/learning/`（含每篇三个动手任务）
 - 故障排查：`docs/troubleshooting/known-issues.md`
 - 当前状态与路线：`docs/project-status.md`、`docs/roadmap.md`
+- 打包成 exe 的方案：`docs/packaging.md`（**方案已定、尚未执行**，等 Phase 3 完成再打包）
 
 ## 数据位置
 

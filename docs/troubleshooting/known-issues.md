@@ -107,6 +107,35 @@ mpv 渲染在原生子窗口（`wid`），`win.grab()` 抓不到其内容——�
 设置页点一次「添加钮（打开方式）」。它只写 `HKCU\Software\Classes`，
 若之前被安全软件清理过需要重新注册；点「移除」可完全撤销。
 
+## 启动脚本 / 批处理类（踩坑留档）
+
+### 双击 `start.bat` 没有任何反应
+按这个顺序查：
+1. `setup.bat` 跑过没有（`.venv\Scripts\pythonw.exe` 在不在）
+2. `debug.bat` 里看真实报错 —— `start.bat` 用的是 `pythonw`，报错不会显示
+3. `%LOCALAPPDATA%\ReplayStudio\logs\` 下最新的 `session-*.log`
+
+`start.bat` 只在"进程起来后 1 秒内又没了"时才提示，慢一点的崩溃它抓不到，
+这种情况一律上 `debug.bat`。
+
+### 崩溃退出码在 cmd 里是负数
+`0xC0000005`（访问违例）在批处理里显示成 `-1073741819`，不是 `3221225477`。
+`debug.bat` 的提示按负数写的。对应关系：`-1073741819 = 0xC0000005`，
+`-1073740791 = 0xC0000409`（栈溢出 / 快速失败）。
+
+### 改 `.bat` 后中文变乱码
+`.bat` 必须是 **GBK + CRLF**：中文 Windows 的 cmd 用 OEM 代码页 936 逐行读文件，
+UTF-8 会乱码；而且编辑工具往 GBK 文件里插中文可能写成 UTF-8 字节，
+文件立刻变混合编码、连解码都失败。改完用 `python -c "...".decode('gbk')` 验一遍。
+仓库的 `.gitattributes` 只保证换行，不保证编码。
+
+### 批处理自身的两个陷阱（写脚本时会再踩）
+- **`del` 会把 `%ERRORLEVEL%` 清零**：`fc` 之后先 `set "SAME=%ERRORLEVEL%"` 再 `del`，
+  否则 `if not errorlevel 1` 恒真。
+- **`for /f in ('"C:\path with space\exe" -c "..."')` 会失败**：
+  `cmd /c` 会吃掉首尾引号，报 `'C:\path with space\exe" -c "import' 不是内部或外部命令`。
+  改成先把输出重定向到临时文件，再 `set /p VAR=<file` 读回来。
+
 ## Qt/PySide6 类（踩坑留档）
 
 - `QImage.scaled()` 关键字参数是 `aspectMode`，**没有** `aspectRatioMode`；

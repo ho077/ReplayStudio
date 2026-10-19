@@ -1,8 +1,21 @@
 # 项目状态
 
-更新：2026-10-19（Phase 1 + 主题系统 + Phase 2 通用播放器 + 播放生命周期重构 + 第三轮体验/稳定性修复）
+更新：2026-10-20（Phase 1 + 主题系统 + Phase 2 通用播放器 + 播放生命周期重构 + 第三轮体验/稳定性修复 + 启动脚本与打包方案）
 
 ## ✅ 已完成并通过验证
+
+### 第四轮：启动脚本 + 打包方案（2026-10-20）
+- **`start.bat` / `debug.bat` / `setup.bat`**：双击启动、调试入口、一次性环境准备。
+  日常用 `pythonw` 不留控制台；`debug.bat` 保留窗口并解释退出码（`0xC0000005` 在 cmd 里
+  显示为 `-1073741819`，已按实测写进提示）
+- **三个脚本都用临时目录 + 桩程序逐条验证过**：正常启动无输出、瞬间退出会提示、
+  缺 `.venv` 会指路 `setup.bat`、参数（含空格路径）完整传递
+- **`setup.bat` 能在没有 `python` 的机器上工作**：本机 PATH 里既没有 `python` 也没有 `py`，
+  脚本按 PATH → 启动器 → 常见安装位置 → 手动输入 的顺序找，实测命中 `D:\Anaconda3\python.exe`
+- **`.bat` 一律 GBK + CRLF**，并加 `.gitattributes` 锁住换行
+- **打包方案落文档**（`docs/packaging.md`）：PyInstaller onedir、先换 PySide6-Essentials、
+  OBS 做成可选、GPL/LGPL 随包许可证清单。**尚未执行打包**，等 Phase 3 完成
+- 过程记录：`docs/devlog/006-launcher-scripts-and-packaging-plan.md`
 
 ### 第三轮：体验与稳定性修复（用户截图反馈驱动）
 - **首帧画面居中**：定位到 `video_host` 的原生 HWND 在创建时被定歪（实测偏 (283,145) px），
@@ -77,6 +90,10 @@
   - [ ] 录制模式 / 参数预设 / 编码器能力探测
   - [ ] 全局热键 + 托盘 + 成品自动入库
 - Phase 4：性能基准与体验打磨
+- **Phase 5：打包 exe** —— 方案已写在 `docs/packaging.md`，
+  触发条件是 Phase 3（录屏）完成。动手前先做三件事：
+  `PySide6` → `PySide6-Essentials`、给 `ensure_mpv_dll()` 加 `sys._MEIPASS` 冻结分支、
+  准备 `LICENSES/`（mpv 是 GPLv2+、OBS 是 GPLv2、Qt 是 LGPLv3）
 
 ## ⚠️ 已知问题与风险
 
@@ -122,6 +139,8 @@
    把阻塞的 `exec()` 从构建逻辑里剥离，换来可测试、可截图、可复用的 UI 代码。
 
 ## ▶ 如何运行
+
+双击 `start.bat` 即可（出问题改双击 `debug.bat`）。命令行等价写法：
 
 ```powershell
 cd D:\WorkSpace\WorkBuddySpace\apps\ReplayStudio

@@ -1,0 +1,2 @@
+# .bat 必须是 CRLF：cmd 对裸 LF 的容忍度很差，Git 默认转换会把启动脚本搞坏
+*.bat text eol=crlf
