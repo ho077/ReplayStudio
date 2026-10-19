@@ -11,3 +11,7 @@ tests/_media/
 tests/_smoke_core.txt
 vendor/obs/
 vendor/obs-portable.zip
+
+# OBS 便携版会把它启动时的工作目录当成配置根，并在那里新建 config/obs-studio/。
+# 我们固定从 exe 所在目录启动，所以这个目录只可能是误操作留下的垃圾。
+/config/
