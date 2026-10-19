@@ -79,45 +79,47 @@ def main() -> int:
     win.resize(1280, 800)
     win.show()
     pump(app, 0.6)
-    pp = win.player_page
+
+    # Playback is tab-based now: every open may create a new tab with its own
+    # engine, so the page must be re-acquired after each open.
+    def cur_page(timeout: float = 8.0):
+        end = time.time() + timeout
+        while time.time() < end:
+            pump(app, 0.05)
+            pg = win.player_page
+            if pg is not None and pg.player is not None:
+                return pg
+        return win.player_page
 
     # force mpv to be constructed before we start loading files
     win.open_paths([SRC])
     pump(app, 2.5)
-    results.append(pp.player is not None)
+    pp = cur_page()
+    results.append(pp is not None and pp.player is not None)
 
     say("== 容器兼容性 ==")
     for ext, path in build_variants().items():
-        errors: list[str] = []
-        pp.player.errorOccurred.connect(errors.append)
         win.open_paths([path])
         pump(app, 2.5)
-        d = pp.player.duration
-        ok = d > 0.5 and not errors
+        pp = cur_page()
+        d = pp.player.duration if pp.player else 0.0
+        ok = d > 0.5 and not pp.last_error
         results.append(ok)
         say(f"[{'PASS' if ok else 'FAIL'}] {ext.upper():5s} 打开 "
-            f"duration={d:.2f}s {errors[:1]}")
-        try:
-            pp.player.errorOccurred.disconnect(errors.append)
-        except (RuntimeError, TypeError):
-            pass
+            f"duration={d:.2f}s {pp.last_error[:40]!r}")
 
     say("\n== 中文 / 空格 / 特殊字符文件名 ==")
     weird = os.path.join(OUT_DIR, "测试 文件 (2024) #1 & 100%.mkv")
     if not os.path.isfile(weird):
         shutil.copyfile(SRC, weird)
-    errors = []
-    pp.player.errorOccurred.connect(errors.append)
     win.open_paths([weird])
     pump(app, 2.5)
-    ok = pp.player.duration > 0.5 and not errors
+    pp = cur_page()
+    d = pp.player.duration if pp.player else 0.0
+    ok = d > 0.5 and not pp.last_error
     results.append(ok)
     say(f"[{'PASS' if ok else 'FAIL'}] {os.path.basename(weird)} "
-        f"duration={pp.player.duration:.2f}s {errors[:1]}")
-    try:
-        pp.player.errorOccurred.disconnect(errors.append)
-    except (RuntimeError, TypeError):
-        pass
+        f"duration={d:.2f}s {pp.last_error[:40]!r}")
 
     say("\n== 损坏文件容错 ==")
     # Case A: truncated MKV. Matroska is streamable, so mpv usually plays the
@@ -127,39 +129,30 @@ def main() -> int:
         head = f.read(120_000)
     with open(broken, "wb") as f:
         f.write(head)
-    errors = []
-    pp.player.errorOccurred.connect(errors.append)
     win.open_paths([broken])
     pump(app, 3.5)
-    alive = pp.player is not None and win.isVisible()
+    pp = cur_page()
+    alive = pp is not None and pp.player is not None and win.isVisible()
     results.append(alive)
     say(f"[{'PASS' if alive else 'FAIL'}] 截断文件：进程存活={alive}，"
-        f"duration={pp.player.duration:.2f}s，错误={errors[:1]}")
-    try:
-        pp.player.errorOccurred.disconnect(errors.append)
-    except (RuntimeError, TypeError):
-        pass
+        f"duration={pp.player.duration if pp.player else 0:.2f}s，"
+        f"错误={pp.last_error[:40]!r}")
 
     # Case B: pure garbage with a video extension — mpv must report a readable
     # error and the UI must surface it (overlay) instead of dying silently.
     garbage = os.path.join(OUT_DIR, "broken-garbage.mp4")
     with open(garbage, "wb") as f:
         f.write(os.urandom(600_000))
-    errors = []
-    pp.player.errorOccurred.connect(errors.append)
     win.open_paths([garbage])
     pump(app, 3.5)
-    alive = pp.player is not None and win.isVisible()
-    ok = alive and bool(errors)
+    pp = cur_page()
+    alive = pp is not None and pp.player is not None and win.isVisible()
+    ok = alive and bool(pp.last_error)
     results.append(ok)
     say(f"[{'PASS' if ok else 'FAIL'}] 垃圾文件：进程存活={alive}，"
-        f"错误提示={errors[:1]}")
+        f"错误提示={pp.last_error[:40]!r}")
     say(f"      界面提示={pp.info_label.text()[:60]!r}，"
         f"覆盖层可见={pp.overlay.isVisible()}")
-    try:
-        pp.player.errorOccurred.disconnect(errors.append)
-    except (RuntimeError, TypeError):
-        pass
 
     say("\n== 拖放事件路由 ==")
     md = QMimeData()
@@ -172,13 +165,14 @@ def main() -> int:
                       Qt.LeftButton, Qt.NoModifier)
     app.sendEvent(win, drop)
     pump(app, 2.5)
-    ok = accepted and (os.path.basename(pp.player.path or "") ==
+    pp = cur_page()
+    ok = accepted and (os.path.basename(pp.player.path if pp.player else "") ==
                        os.path.basename(SRC))
     results.append(ok)
     say(f"[{'PASS' if ok else 'FAIL'}] dragEnter accepted={accepted}，"
-        f"当前播放={os.path.basename(pp.player.path or '')}")
+        f"当前播放={os.path.basename(pp.player.path if pp.player else '')}")
 
-    pp.shutdown()
+    win.player_tabs.close_all()
     win.thumbs.pool.waitForDone(3000)
 
     passed = sum(1 for r in results if r)

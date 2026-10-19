@@ -147,6 +147,7 @@ class PlayerPage(QFrame):
     positionReported = Signal(str, float, float)   # video_id, pos_s, duration_s
     playlistIndexSelected = Signal(int)            # index into current context
     fileDropped = Signal(str)                      # a video file dropped in
+    rowChanged = Signal(dict)                      # a different row got loaded
 
     def __init__(self, settings, parent=None):
         super().__init__(parent)
@@ -157,6 +158,13 @@ class PlayerPage(QFrame):
         self._fs = False
         self._context: list[dict] = []
         self._event_markers: list[tuple[float, str]] = []
+        # Parking state: set by the tab host when this page goes to the
+        # background, so switching back restores what the user was doing.
+        self.parked_playing = False
+        self.parked_muted = False
+        # Last load error, kept so diagnostics (and tests) can tell "the engine
+        # said nothing" apart from "the engine complained".
+        self.last_error = ""
         self.setAcceptDrops(True)
 
         root = QVBoxLayout(self)
@@ -408,7 +416,11 @@ class PlayerPage(QFrame):
     # ---------------------------------------------------------------- loading
     def load(self, row: dict, start_pos: float | None = None):
         """Open one indexed video row."""
+        # Reset the error state *before* loading: a missing file reports
+        # synchronously, and clearing afterwards would erase that message.
+        self.clear_error()
         self._current = row
+        self.rowChanged.emit(row)
         self.title_label.setText(row.get("vname") or row.get("vtype") or
                                  os.path.basename(row.get("path", "")))
         parts = [x for x in (row.get("map_cn"), row.get("agent_cn"), row.get("mode_cn")) if x]
@@ -780,16 +792,20 @@ class PlayerPage(QFrame):
 
     def _on_ended(self):
         self.btn_play.setText("▶")
+        if self.player is None:      # tab is closing; never chain into next
+            return
         if int(self.settings.get("autoplay_next", 1)):
             self.nextRequested.emit()
 
     def _on_error(self, msg: str):
+        self.last_error = msg
         T.style(self.info_label, "color: $AMBER; font-size: 12px;")
         self.info_label.setText(msg.replace("\n", " "))
         self.btn_play.setText("▶")
         self._show_overlay(msg)
 
     def clear_error(self):
+        self.last_error = ""
         T.style(self.info_label, "color: $TEXT_DIM; font-size: 12px;")
         self.overlay.hide()
 
@@ -820,3 +836,41 @@ class PlayerPage(QFrame):
         self._timer.stop()
         if self.player:
             self.player.shutdown()
+
+    # ------------------------------------------------------------ tab host API
+    def current_row(self) -> dict | None:
+        """What this page is playing (the tab host keys off `video_id`)."""
+        return self._current
+
+    def context(self) -> list[dict]:
+        """The list this tab was opened from (playlist / next / prev)."""
+        return self._context
+
+    def start_ticking(self):
+        if self.player and not self._timer.isActive():
+            self._timer.start()
+
+    def stop_ticking(self):
+        self._timer.stop()
+
+    def refresh_theme(self):
+        self.update()
+        self.timeline.update()
+
+    def release(self):
+        """Stop playback and destroy the engine. Idempotent.
+
+        Order matters: detach our reference *first* so the still-running mpv
+        callbacks hit the `if not self.player` guards instead of touching an
+        object we are about to terminate. Then stop, then terminate.
+        """
+        self._timer.stop()
+        self._osd_timer.stop()
+        page_player = self.player
+        self.player = None
+        self._player_ready = False
+        if page_player is not None:
+            # shutdown() stops *and* terminates, and silences callbacks first —
+            # a stop() here would emit end-file and could trigger auto-play on
+            # a tab that is being closed.
+            page_player.shutdown()

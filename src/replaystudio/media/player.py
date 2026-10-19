@@ -89,28 +89,53 @@ class MpvPlayer(QObject):
         self._wid = wid
         self._path = ""
         self._muted = False
+        # Guards every callback the engine thread can invoke. Once we start
+        # tearing the instance down, late events must become no-ops: a
+        # RuntimeError ("Signal source has been deleted") raised on mpv's event
+        # thread is *not* caught by Qt and has been seen to kill the process.
+        self._alive = True
         # EOF can arrive through two independent channels (the `end-file`
         # event and the `eof-reached` property observer). Without a latch both
         # would fire `ended` for the same clip and auto-play would skip one
         # video. The latch is cleared every time a new file is loaded.
         self._ended_fired = False
 
-        self._mpv.observe_property("time-pos", self._on_time_pos)
-        self._mpv.observe_property("duration", self._on_duration)
-        self._mpv.observe_property("pause", self._on_pause)
-        self._mpv.observe_property("volume", self._on_volume)
-        self._mpv.observe_property("mute", self._on_mute)
-        self._mpv.observe_property("speed", self._on_speed)
-        self._mpv.observe_property("path", self._on_path)
-        self._mpv.observe_property("hwdec-current", self._on_hwdec)
-        self._mpv.observe_property("track-list", self._on_track_list)
+        self._mpv.observe_property("time-pos", self._guard(self._on_time_pos))
+        self._mpv.observe_property("duration", self._guard(self._on_duration))
+        self._mpv.observe_property("pause", self._guard(self._on_pause))
+        self._mpv.observe_property("volume", self._guard(self._on_volume))
+        self._mpv.observe_property("mute", self._guard(self._on_mute))
+        self._mpv.observe_property("speed", self._guard(self._on_speed))
+        self._mpv.observe_property("path", self._guard(self._on_path))
+        self._mpv.observe_property("hwdec-current", self._guard(self._on_hwdec))
+        self._mpv.observe_property("track-list", self._guard(self._on_track_list))
         # `keep_open=always` pauses on the last frame and never sends end-file,
         # so EOF is detected through this property instead (autoplay depends on it).
-        self._mpv.observe_property("eof-reached", self._on_eof)
-        self._mpv.observe_property("video-params/aspect", self._on_aspect_prop)
-        self._mpv.register_event_callback(self._on_event)
+        self._mpv.observe_property("eof-reached", self._guard(self._on_eof))
+        self._mpv.observe_property("video-params/aspect",
+                                   self._guard(self._on_aspect_prop))
+        self._mpv.register_event_callback(self._guard(self._on_event))
 
     # ------------------------------------------------------------- plumbing
+    def _guard(self, fn):
+        """Make one engine callback safe to call after shutdown.
+
+        mpv's event thread keeps delivering property changes while we tear the
+        instance down. Emitting a Qt signal from a wrapper that is already gone
+        raises RuntimeError *outside* any Qt handler, which Python reports as an
+        unhandled exception — and in this process that meant a silent exit.
+        """
+        def wrapper(*args, **kwargs):
+            if not self._alive:
+                return
+            try:
+                fn(*args, **kwargs)
+            except RuntimeError:
+                self._alive = False
+            except Exception:
+                pass
+        wrapper.__name__ = getattr(fn, "__name__", "callback")
+        return wrapper
     @staticmethod
     def _log(level, component, message):
         if level in ("error", "fatal"):
@@ -485,6 +510,18 @@ class MpvPlayer(QObject):
             return ""
 
     def shutdown(self):
+        """Stop decoding and tear the instance down.
+
+        `command("stop")` first releases the audio device and the video output
+        *before* the event thread is joined, which avoids the engine being torn
+        down mid-frame. `_alive` goes down first so any callback that already
+        queued up becomes a no-op. Safe to call more than once.
+        """
+        self._alive = False
+        try:
+            self._mpv.command("stop")
+        except Exception:
+            pass
         try:
             self._mpv.terminate()
         except Exception:

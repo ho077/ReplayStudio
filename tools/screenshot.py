@@ -38,7 +38,7 @@ def main():
             win.grab().save(os.path.join(SHOT_DIR, "02-player.png"))
             print("shot 02", flush=True)
         elif n == 26:
-            win.player_page.shutdown()
+            win.player_tabs.close_all()
             win.navigate("settings")
         elif n == 28:
             win.grab().save(os.path.join(SHOT_DIR, "03-settings.png"))

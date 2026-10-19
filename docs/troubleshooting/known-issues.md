@@ -19,6 +19,36 @@
 中文名映射来自官方本地化表；未收录的新特工/新地图会回退显示原始名称（刻意不编造）。
 更新 `aclos/taxonomy.py` 后重建索引即可。
 
+## 进程/生命周期类
+
+### 返回媒体库后还在响声音（已修复，留档）
+根因：`navigate()` 只 `setCurrentWidget`，播放页被**隐藏**而非停止，`MpvPlayer` 继续解码出声。
+现在播放由 `ui/player_tabs.py` 承载「一视频一标签」：关闭标签/按返回会
+`release()` 销毁引擎；切到别处 `park_all()` 会**暂停并静音**全部标签。
+详见 `docs/devlog/004-playback-lifecycle-and-crash-logging.md`。
+
+### 程序静默退出 / 崩溃
+现在启动即写日志，位置在 `%LOCALAPPDATA%\ReplayStudio\logs\`：
+
+| 文件 | 内容 |
+| --- | --- |
+| `session-*.log` | 生命周期面包屑（开关标签、播放路径）+ 未捕获异常的完整 traceback + Qt 告警 |
+| `crash-*.log` | `faulthandler` 的全线程原生栈（段错误 / 访问违例） |
+
+设置页 →「索引与缓存」→「打开日志目录」。反馈崩溃时请附**最新的 `session-*.log`**；
+如果同时存在 `crash-*.log` 则说明是原生崩溃（多半在 libmpv 内部）。
+7 天前的日志会在启动时自动清理。
+
+已消除的两个已知诱因：
+1. `Signal source has been deleted` —— mpv 事件线程向已销毁的 Qt 对象发信号，
+   抛在事件循环之外会直接杀进程。现所有引擎回调经 `MpvPlayer._guard()` 包裹，
+   且 `shutdown()` 先降 `_alive` 旗再 `stop` 再 `terminate`。
+2. 向**隐藏**的原生子窗口持续渲染（d3d11va）。标签模型下不再存在隐藏的活跃播放页。
+
+### 标签开太多变慢
+上限 6 个（`ui/player_tabs.py::MAX_TABS`），超出会关闭最早的非当前标签。
+每个标签持有独立 `MpvPlayer`，也就是一份独立解码器。
+
 ## 播放类
 
 ### 续播报 mpv -12（已修复，留档）

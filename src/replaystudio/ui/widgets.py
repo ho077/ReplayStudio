@@ -145,12 +145,15 @@ class Sidebar(QFrame):
             ("record", "●", "录屏"),
             ("favorites", "★", "收藏"),
             ("recent", "⟲", "最近播放"),
+            ("player", "▶", "正在播放"),
             ("settings", "⚙", "设置"),
         ):
             b = NavButton(icon, text)
             b.clicked.connect(lambda _=False, k=key: self.navigate.emit(k))
             self.buttons[key] = b
             lay.addWidget(b)
+        # Only meaningful while something is open in a playback tab.
+        self.buttons["player"].hide()
         lay.addStretch()
 
         self.stats = QLabel("")
@@ -163,6 +166,16 @@ class Sidebar(QFrame):
     def set_active(self, key: str):
         for k, b in self.buttons.items():
             b.set_active(k == key)
+
+    def set_playing(self, count: int, title: str = ""):
+        """Show the "正在播放" entry only while a playback tab exists —
+        otherwise closing every tab would leave a dead navigation item."""
+        b = self.buttons.get("player")
+        if b is None:
+            return
+        b.setVisible(count > 0)
+        if count > 0:
+            b.setToolTip(f"{title}\n（{count} 个标签）" if title else f"{count} 个播放标签")
 
 
 # -------------------------------------------------------------------- search input

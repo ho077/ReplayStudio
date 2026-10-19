@@ -39,6 +39,8 @@ py -3.13 -m venv .venv
 | 播放 | libmpv 硬件解码（d3d11va）、倍速、全屏、画面比例、截图、断点续播、事件时间轴跳转、自动连播 |
 | 字幕/音轨 | 内嵌轨选择、外挂 SRT/ASS、延迟微调、多音轨切换 |
 | 主题 | 六套无畏契约特工配色，设置页即时切换并持久化 |
+| 多标签播放 | 一个视频一个标签，关闭标签即销毁引擎；后台标签自动暂停并静音 |
+| 崩溃取证 | 启动即写 `%LOCALAPPDATA%\ReplayStudio\logs\`，设置页可一键打开日志目录 |
 | 系统集成 | 拖放打开、HKCU「打开方式」注册（可撤销） |
 
 ## 依赖
@@ -55,7 +57,9 @@ py -3.13 -m venv .venv
 ```powershell
 .venv\Scripts\python.exe tests\smoke_core.py        # 解析→索引→查询
 .venv\Scripts\python.exe tools\smoke_gui.py         # 导航/筛选/缩略图
-.venv\Scripts\python.exe tools\smoke_phase2.py      # 播放器功能 18 项
+.venv\Scripts\python.exe tools\smoke_tabs.py        # 标签生命周期回归 21 项
+.venv\Scripts\python.exe tools\smoke_diagnostics.py # 崩溃日志捕获 3 项
+.venv\Scripts\python.exe tools\smoke_phase2.py      # 播放器功能 19 项
 .venv\Scripts\python.exe tools\smoke_containers.py  # 容器兼容 + 损坏容错 9 项
 .venv\Scripts\python.exe tools\smoke_playback.py    # 真实录像播放
 ```
@@ -63,10 +67,19 @@ py -3.13 -m venv .venv
 测试样本由 `tools/make_phase2_sample.py` 用 FFmpeg 现场合成到 `tests/_media/`，
 **不会读写用户任何原始录像**。
 
+## 出问题了怎么排查
+
+崩溃与运行日志在 `%LOCALAPPDATA%\ReplayStudio\logs\`（设置页有「打开日志目录」按钮）：
+
+- `session-*.log` — 生命周期记录 + 未捕获异常的完整 traceback + Qt 告警
+- `crash-*.log` — 原生崩溃（段错误 / 访问违例）的全线程栈，存在即说明是引擎层崩溃
+
+日志 7 天后自动清理。反馈问题时附上最新的 `session-*.log` 即可。
+
 ## 文档
 
 - 架构与决策：`docs/architecture/`（`decision-001` 技术栈、`decision-002` 播放器模型）
-- 开发日志：`docs/devlog/`（000 立项 / 001 媒体库 / 002 主题 / 003 通用播放器）
+- 开发日志：`docs/devlog/`（000 立项 / 001 媒体库 / 002 主题 / 003 通用播放器 / 004 播放生命周期与崩溃日志）
 - 学习文档：`docs/learning/`（含每篇三个动手任务）
 - 故障排查：`docs/troubleshooting/known-issues.md`
 - 当前状态与路线：`docs/project-status.md`、`docs/roadmap.md`

@@ -8,11 +8,16 @@ from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication
 
+from .core import diagnostics
 from .media.player import ensure_mpv_dll
 from .ui.main_window import MainWindow
 
 
 def main(argv: list[str] | None = None) -> int:
+    # First thing that runs: if the process dies later there must already be a
+    # file explaining why.
+    diagnostics.install()
+
     os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
     os.environ.setdefault("QT_SCALE_FACTOR_ROUNDING_POLICY", "PassThrough")
 
@@ -32,6 +37,7 @@ def main(argv: list[str] | None = None) -> int:
     app.setStyle("Fusion")
     font = QFont("Microsoft YaHei UI", 9)
     app.setFont(font)
+    diagnostics.install_qt(app)
 
     win = MainWindow()
     win.show()

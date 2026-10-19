@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFileDialog,
                                QSpinBox, QVBoxLayout, QWidget)
 
 from ..aclos import reader
-from ..core import assoc
+from ..core import assoc, diagnostics
 from ..core.db import user_data_dir
 from ..media import thumbs
 from ..media.player import ensure_mpv_dll
@@ -242,8 +242,16 @@ class SettingsPage(QFrame):
         b_open = QPushButton("打开数据目录")
         b_open.clicked.connect(lambda: self._open(user_data_dir()))
         r3.addWidget(b_open)
+        b_logs = QPushButton("打开日志目录")
+        b_logs.setToolTip("崩溃日志与运行日志都在这里；反馈问题时请附上最新的 session-*.log")
+        b_logs.clicked.connect(lambda: self._open(str(diagnostics.log_dir())))
+        r3.addWidget(b_logs)
         r3.addStretch()
         l3.addLayout(r3)
+        self.lbl_log = QLabel("")
+        T.style(self.lbl_log, "color: $TEXT_FAINT; font-size: 11px;")
+        self.lbl_log.setWordWrap(True)
+        l3.addWidget(self.lbl_log)
         root.addWidget(c3)
 
         # ---------------- about
@@ -336,3 +344,8 @@ class SettingsPage(QFrame):
         self.lbl_stats.setText(
             f"对局 {s['matches']} 场 · 片段 {s['videos']} 个 · 事件 {s['events']} 条 · "
             f"占用 {s['bytes']/1024**3:.1f} GB · 缺失 {s['missing']} 个")
+        cur = diagnostics.current_log()
+        if cur is not None:
+            self.lbl_log.setText(f"本次运行日志：{cur}")
+        else:
+            self.lbl_log.setText(f"日志目录：{diagnostics.log_dir()}")

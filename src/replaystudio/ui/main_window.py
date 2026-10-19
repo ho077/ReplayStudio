@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QInputDialog,
                                QSizeGrip, QStackedWidget, QVBoxLayout, QWidget)
 
 from ..aclos import reader
+from ..core import diagnostics
 from ..core.config import Settings
 from ..core.db import Database
 from ..core.local_scanner import VIDEO_EXTS, video_id_for
@@ -22,7 +23,8 @@ from . import theme as T
 from .local_page import LocalPage
 from .moments_page import MomentsPage
 from .pages import RecordPage, SimpleGridPage
-from .player_page import SUB_EXTS, PlayerPage
+from .player_page import SUB_EXTS
+from .player_tabs import PlayerTabs
 from .settings_page import SettingsPage
 from .widgets import Sidebar, TitleBar
 
@@ -43,7 +45,6 @@ class MainWindow(QMainWindow):
         self.setStyleSheet(T.QSS)
         self.thumbs = ThumbnailService(self)
         self._scan_worker = None
-        self._play_context: list[dict] = []
         self._last_history_write = 0.0
 
         central = QWidget()
@@ -99,11 +100,11 @@ class MainWindow(QMainWindow):
         self.favorites = SimpleGridPage(self.db, self.thumbs, "favorites", self)
         self.recent = SimpleGridPage(self.db, self.thumbs, "recent", self)
         self.settings_page = SettingsPage(self.db, self.settings, self)
-        self.player_page = PlayerPage(self.settings, self)
-        self.player_page.set_db(self.db)
+        # One tab == one playback session (own page, own mpv instance).
+        self.player_tabs = PlayerTabs(self.settings, self.db, self)
 
         for w in (self.moments, self.local, self.record, self.favorites,
-                  self.recent, self.settings_page, self.player_page):
+                  self.recent, self.settings_page, self.player_tabs):
             self.stack.addWidget(w)
 
         # page signals
@@ -120,14 +121,32 @@ class MainWindow(QMainWindow):
         self.settings_page.recheckRequested.connect(self.recheck_files)
         self.settings_page.dirChanged.connect(lambda _d: self.start_scan(False))
 
-        self.player_page.backRequested.connect(lambda: self.navigate(self._nav_before_player))
-        self.player_page.prevRequested.connect(lambda: self.step(-1))
-        self.player_page.nextRequested.connect(lambda: self.step(1))
-        self.player_page.positionReported.connect(self._record_position)
-        self.player_page.playlistIndexSelected.connect(self.play_index)
-        self.player_page.fileDropped.connect(lambda p: self.open_paths([p]))
+        self.player_tabs.positionReported.connect(self._record_position)
+        self.player_tabs.fileDropped.connect(lambda p: self.open_paths([p]))
+        self.player_tabs.prevRequested.connect(lambda: self.step(-1))
+        self.player_tabs.nextRequested.connect(lambda: self.step(1))
+        self.player_tabs.playlistIndexSelected.connect(self.play_index)
+        self.player_tabs.empty.connect(self._on_tabs_empty)
+        self.player_tabs.changed.connect(self._on_tab_count_changed)
 
         self._nav_before_player = "moments"
+        self._shutting_down = False
+
+    @property
+    def player_page(self):
+        """The currently focused playback page (None when no tab is open)."""
+        return self.player_tabs.current_page()
+
+    def _on_tabs_empty(self):
+        if self._shutting_down:
+            return
+        self.navigate(self._nav_before_player)
+
+    def _on_tab_count_changed(self, count: int):
+        """Keep the sidebar in sync: show/refresh 正在播放, drop it when empty."""
+        self.sidebar.set_playing(count, self.player_tabs.active_title())
+        if count and self.stack.currentWidget() is self.player_tabs:
+            self.sidebar.set_active("player")
 
     def apply_theme(self, key: str):
         """Swap the palette live: rebind constants → re-render every registered
@@ -139,13 +158,17 @@ class MainWindow(QMainWindow):
         self.settings["theme"] = T.current_key()
         for page in (self.moments, self.local, self.favorites, self.recent):
             page.grid.viewport().update()
-        self.player_page.timeline.update()
+        self.player_tabs.refresh_theme()
         self.set_status(f"已切换主题：{T.palette().name}")
 
     def navigate(self, key: str):
+        # "player" is the playback area itself; it only exists while a tab is
+        # open, so an empty request falls back to where the user came from.
+        if key == "player" and self.player_tabs.count() == 0:
+            key = self._nav_before_player
         pages = {"moments": self.moments, "local": self.local, "record": self.record,
                  "favorites": self.favorites, "recent": self.recent,
-                 "settings": self.settings_page}
+                 "player": self.player_tabs, "settings": self.settings_page}
         page = pages.get(key, self.moments)
         if key in ("favorites", "recent"):
             page.reload()
@@ -154,8 +177,15 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentWidget(page)
         self.sidebar.set_active(key)
         self._current_nav = key
-        if key != "settings":
+        if key not in ("settings", "player"):
             self._nav_before_player = key
+        # Leaving the player area must silence it. Previously the page was only
+        # hidden, so mpv kept decoding and the audio kept playing in the
+        # background — that was the reported bug.
+        if page is self.player_tabs:
+            self.player_tabs.activate_current()
+        else:
+            self.player_tabs.park_all()
         self._refresh_sidebar_stats()
 
     def _refresh_sidebar_stats(self):
@@ -219,47 +249,53 @@ class MainWindow(QMainWindow):
 
     # ----------------------------------------------------------------- playback
     def open_player(self, row: dict, context: list[dict] | None = None):
-        """Play `row`; `context` (defaults to the visible grid) feeds the playlist."""
+        """Open `row` in a fresh playback tab; `context` fills that tab's playlist."""
         source_page = self.stack.currentWidget()
         if context is not None:
-            self._play_context = list(context)
-        elif source_page is not self.player_page and hasattr(source_page, "rows"):
-            self._play_context = list(source_page.rows())
+            ctx = list(context)
+        elif source_page is not self.player_tabs and hasattr(source_page, "rows"):
+            ctx = list(source_page.rows())
+        else:
+            ctx = [row]
         start = 0.0
         if int(self.settings.get("remember_position", 1)):
             start = self.db.last_position(row.get("video_id", "")) or 0.0
-        self.player_page.clear_error()
-        self.stack.setCurrentWidget(self.player_page)
-        if self._play_context:
-            self.player_page.set_context(self._play_context, row.get("video_id", ""))
-        self.player_page.load(row, start)
+        self.stack.setCurrentWidget(self.player_tabs)
+        page = self.player_tabs.open_row(row, ctx, start)
+        self.sidebar.set_active("player")
+        return page
 
-    def play_index(self, index: int):
+    def play_index(self, index: int) -> bool:
         """Playback requested straight from the playlist tab."""
-        if not (0 <= index < len(self._play_context)):
-            return
-        self.player_page.clear_error()
-        self.player_page.load(self._play_context[index], 0.0)
+        page = self.player_tabs.current_page()
+        if page is None:
+            return False
+        ctx = page.context()
+        if not (0 <= index < len(ctx)):
+            return False
+        page.clear_error()
+        page.load(ctx[index], 0.0)
+        return True
 
     def step(self, delta: int) -> bool:
-        """Previous/next inside the current context. Returns False at the ends
-        so the caller can stop auto-play instead of looping forever."""
-        if not self._play_context:
+        """Previous/next inside the active tab's context. Returns False at the
+        ends so auto-play can stop instead of looping forever."""
+        page = self.player_tabs.current_page()
+        if page is None:
             return False
-        cur = self.player_page._current
-        if not cur:
+        ctx = page.context()
+        cur = page.current_row()
+        if not cur or not ctx:
             return False
         vid = cur.get("video_id")
-        idx = next((i for i, r in enumerate(self._play_context)
-                    if r.get("video_id") == vid), -1)
+        idx = next((i for i, r in enumerate(ctx) if r.get("video_id") == vid), -1)
         if idx < 0:
             return False
         nxt = idx + delta
-        if not (0 <= nxt < len(self._play_context)):
+        if not (0 <= nxt < len(ctx)):
             return False
-        row = self._play_context[nxt]
-        self.player_page.clear_error()
-        self.player_page.load(row, 0.0)
+        page.clear_error()
+        page.load(ctx[nxt], 0.0)
         return True
 
     # ------------------------------------------------------- external files
@@ -326,10 +362,12 @@ class MainWindow(QMainWindow):
 
         if vids:
             self.open_paths(vids)
-        elif subs and self.player_page.player:
-            for s in subs:
-                self.player_page.player.add_subtitle(s)
-            self.player_page.show_osd(f"已挂载 {len(subs)} 个字幕文件")
+        elif subs:
+            page = self.player_tabs.current_page()
+            if page and page.player:
+                for s in subs:
+                    page.player.add_subtitle(s)
+                page.show_osd(f"已挂载 {len(subs)} 个字幕文件")
 
         if dirs:
             d = dirs[0]
@@ -387,42 +425,50 @@ class MainWindow(QMainWindow):
             sc = QShortcut(QKeySequence(key), self)
             sc.activated.connect(fn)
 
-        def on_player() -> bool:
-            return self.stack.currentWidget() is self.player_page
+        def page():
+            """The active playback tab, or None when the player is not visible."""
+            if self.stack.currentWidget() is not self.player_tabs:
+                return None
+            return self.player_tabs.current_page()
+
+        def run(fn):
+            pg = page()
+            if pg is not None:
+                fn(pg)
 
         def seek(direction: int, long_jump: bool = False):
-            if not on_player():
+            pg = page()
+            if pg is None:
                 return
             key = "seek_step_long" if long_jump else "seek_step"
             try:
                 step = abs(int(self.settings.get(key, 5)))
             except (TypeError, ValueError):
                 step = 5
-            self.player_page.seek_relative(direction * step)
-            self.player_page.show_osd(f"{direction*step:+d}s", 900)
+            pg.seek_relative(direction * step)
+            pg.show_osd(f"{direction*step:+d}s", 900)
 
-        add("Space", lambda: self.player_page.toggle_play() if on_player() else None)
+        add("Space", lambda: run(lambda pg: pg.toggle_play()))
         add("Right", lambda: seek(1))
         add("Left", lambda: seek(-1))
         add("Shift+Right", lambda: seek(1, True))
         add("Shift+Left", lambda: seek(-1, True))
         add("Up", lambda: self._volume_step(5))
         add("Down", lambda: self._volume_step(-5))
-        add("F", lambda: self.player_page.toggle_fullscreen() if on_player() else None)
-        add("M", lambda: self.player_page._toggle_mute() if on_player() else None)
-        add("S", lambda: self.player_page.take_screenshot() if on_player() else None)
-        add("J", lambda: self.player_page.cycle_subtitle(True) if on_player() else None)
-        add("Shift+J", lambda: self.player_page.player.select_subtitle(None)
-            if on_player() and self.player_page.player else None)
-        add("K", lambda: self.player_page.cycle_audio(True) if on_player() else None)
-        add("A", lambda: self.player_page._menu_aspect() if on_player() else None)
-        add("P", lambda: self.step(-1) if on_player() else None)
-        add("N", lambda: self.step(1) if on_player() else None)
-        add("Escape", lambda: self.navigate(self._nav_before_player) if on_player() else None)
-        add("[", lambda: self.player_page.set_speed(max(0.25, self.player_page.player.speed - 0.25))
-            if on_player() and self.player_page.player else None)
-        add("]", lambda: self.player_page.set_speed(min(4.0, self.player_page.player.speed + 0.25))
-            if on_player() and self.player_page.player else None)
+        add("F", lambda: run(lambda pg: pg.toggle_fullscreen()))
+        add("M", lambda: run(lambda pg: pg._toggle_mute()))
+        add("S", lambda: run(lambda pg: pg.take_screenshot()))
+        add("J", lambda: run(lambda pg: pg.cycle_subtitle(True)))
+        add("Shift+J", lambda: run(lambda pg: pg.player and pg.player.select_subtitle(None)))
+        add("K", lambda: run(lambda pg: pg.cycle_audio(True)))
+        add("A", lambda: run(lambda pg: pg._menu_aspect()))
+        add("P", lambda: page() and self.step(-1))
+        add("N", lambda: page() and self.step(1))
+        # Escape / 返回 both mean "close this playback tab", which also stops
+        # the engine — closing the tab *is* stopping the video.
+        add("Escape", lambda: page() and self.player_tabs.close_current())
+        add("[", lambda: run(lambda pg: pg.player and pg.set_speed(max(0.25, pg.player.speed - 0.25))))
+        add("]", lambda: run(lambda pg: pg.player and pg.set_speed(min(4.0, pg.player.speed + 0.25))))
         add("Ctrl+F", lambda: self.moments.search.setFocus())
         add("Ctrl+O", lambda: self._open_file_dialog())
 
@@ -435,13 +481,19 @@ class MainWindow(QMainWindow):
             self.open_paths(paths)
 
     def _volume_step(self, delta: int):
-        if self.stack.currentWidget() is not self.player_page:
+        page = self.player_tabs.current_page() if self.stack.currentWidget() is self.player_tabs else None
+        if page is None:
             return
-        v = self.player_page.vol.value() + delta
-        self.player_page.vol.setValue(max(0, min(130, v)))
+        v = page.vol.value() + delta
+        page.vol.setValue(max(0, min(130, v)))
 
     # ------------------------------------------------------------------ teardown
     def closeEvent(self, e):  # noqa: N802
-        self.player_page.shutdown()
+        self._shutting_down = True
+        # Destroy every engine before the widgets go away, so mpv never gets a
+        # chance to render into a window that is being torn down (the likely
+        # cause of the silent crash we were chasing).
+        self.player_tabs.close_all()
         self.thumbs.pool.waitForDone(3000)
+        diagnostics.note("window closed")
         super().closeEvent(e)

@@ -165,68 +165,75 @@ def main() -> int:
         row_a["vname"], row_b2["vname"] = "A-短片", "B-长片"
         row_a["video_id"], row_b2["video_id"] = "ROW-A", "ROW-B"
         win.open_player(row_a, context=[row_a, row_b2])
+        # Each open_player may create a *new* tab with its own engine, so the
+        # engine reference from earlier in the script is stale. Re-acquire.
+        p = player_of(win, app)
+        results.append(check("连播用例前置：引擎就绪", p is not None))
 
-        # Wait for the engine to report THIS clip's duration. Right after a
-        # file switch the property can still hold the previous clip's value
-        # (or 0); seeking against a stale value jumps past the real end and
-        # the EOF never looks the way the test expects. That race — not the
-        # product code — is what made this check flaky.
-        dur = wait_duration(p, app, below=12.0)
-        say(f"      A 片时长 = {dur:.2f}s（切文件后已稳定）")
+        if p is not None:
+            # Wait for the engine to report THIS clip's duration. Right after a
+            # file switch the property can still hold the previous clip's value
+            # (or 0); seeking against a stale value jumps past the real end and
+            # the EOF never looks the way the test expects. That race — not the
+            # product code — is what made this check flaky.
+            dur = wait_duration(p, app, below=12.0)
+            say(f"      A 片时长 = {dur:.2f}s（切文件后已稳定）")
 
-        ended: list[str] = []
+            ended: list[str] = []
 
-        # NOTE: PySide6 may drop a bare lambda slot, so keep a real reference.
-        def _on_end():
-            ended.append("ended")
+            # NOTE: PySide6 may drop a bare lambda slot, so keep a real reference.
+            def _on_end():
+                ended.append("ended")
 
-        p.ended.connect(_on_end)
-        target = max(0.0, dur - 1.0)
-        say(f"      seek -> {target:.2f}s，之后轮询等待结束事件")
-        p.seek(target)
+            p.ended.connect(_on_end)
+            target = max(0.0, dur - 1.0)
+            say(f"      seek -> {target:.2f}s，之后轮询等待结束事件")
+            p.seek(target)
 
-        # Poll instead of a fixed sleep: EOF on a 6s clip is not instant and
-        # the exact latency depends on mpv's decode pipeline.
-        deadline = time.time() + 8.0
-        while time.time() < deadline and not ended:
-            pump(app, 0.1)
-        pump(app, 0.6)          # let the auto-advance handler run
-        results.append(check("播放结束事件触发", bool(ended),
-                            f"events={ended}"))
-        try:
-            p.ended.disconnect(_on_end)
-        except (RuntimeError, TypeError):
-            pass
-        results.append(check("自动连播切换到下一项",
-                             (win.player_page._current or {}).get("video_id") == "ROW-B",
-                             f"current={(win.player_page._current or {}).get('vname')}"))
+            # Poll instead of a fixed sleep: EOF on a 6s clip is not instant and
+            # the exact latency depends on mpv's decode pipeline.
+            deadline = time.time() + 8.0
+            while time.time() < deadline and not ended:
+                pump(app, 0.1)
+            pump(app, 0.6)          # let the auto-advance handler run
+            results.append(check("播放结束事件触发", bool(ended),
+                                f"events={ended}"))
+            try:
+                p.ended.disconnect(_on_end)
+            except (RuntimeError, TypeError):
+                pass
+            results.append(check("自动连播切换到下一项",
+                                 (win.player_page._current or {}).get("video_id") == "ROW-B",
+                                 f"current={(win.player_page._current or {}).get('vname')}"))
 
-        # Regression: EOF arrives through two channels (end-file event and the
-        # eof-reached property). Without the `_ended_fired` latch both fire and
-        # auto-play jumps TWO items. Verify it advances exactly one position.
-        rows3 = []
-        for i, vid in enumerate(("ROW-1", "ROW-2", "ROW-3")):
-            r = dict(row_a)
-            r["video_id"] = vid
-            r["vname"] = f"第{vid[-1]}段"
-            rows3.append(r)
-        win.open_player(rows3[0], context=rows3)
-        dur3 = wait_duration(p, app, below=12.0)
-        say(f"      3 段场景时长 = {dur3:.2f}s")
-        p.seek(max(0.0, dur3 - 1.0))
-        deadline = time.time() + 8.0
-        diag = []
-        while time.time() < deadline:
-            pump(app, 0.1)
-            diag.append(f"pos={p.position:.1f} latch={getattr(p, '_ended_fired', '?')} "
-                        f"cur={(win.player_page._current or {}).get('video_id')}")
-            if (win.player_page._current or {}).get("video_id") == "ROW-2":
-                break
-        say("      诊断: " + " | ".join(diag[::12][:6]))
-        pump(app, 1.2)   # give a (buggy) second advance a chance to happen
-        jumped = (win.player_page._current or {}).get("video_id")
-        results.append(check("连播只前进一项（不跳过）", jumped == "ROW-2",
-                             f"current={jumped}"))
+            # Regression: EOF arrives through two channels (end-file event and
+            # the eof-reached property). Without the `_ended_fired` latch both
+            # fire and auto-play jumps TWO items. Verify it advances exactly one.
+            rows3 = []
+            for i, vid in enumerate(("ROW-1", "ROW-2", "ROW-3")):
+                r = dict(row_a)
+                r["video_id"] = vid
+                r["vname"] = f"第{vid[-1]}段"
+                rows3.append(r)
+            win.open_player(rows3[0], context=rows3)
+            p = player_of(win, app)
+            dur3 = wait_duration(p, app, below=12.0) if p else 0.0
+            say(f"      3 段场景时长 = {dur3:.2f}s")
+            if p is not None:
+                p.seek(max(0.0, dur3 - 1.0))
+            deadline = time.time() + 8.0
+            diag = []
+            while time.time() < deadline:
+                pump(app, 0.1)
+                diag.append(f"pos={p.position:.1f} latch={getattr(p, '_ended_fired', '?')} "
+                            f"cur={(win.player_page._current or {}).get('video_id')}")
+                if (win.player_page._current or {}).get("video_id") == "ROW-2":
+                    break
+            say("      诊断: " + " | ".join(diag[::12][:6]))
+            pump(app, 1.2)   # give a (buggy) second advance a chance to happen
+            jumped = (win.player_page._current or {}).get("video_id")
+            results.append(check("连播只前进一项（不跳过）", jumped == "ROW-2",
+                                 f"current={jumped}"))
     else:
         say("      (跳过自动连播：缺少短样本，先运行 tools/smoke_containers.py)")
 
@@ -238,9 +245,25 @@ def main() -> int:
     results.append(check("文件关联注册/撤销闭环",
                          ok1 and registered and ok2 and cleaned, f"{m1} | {m2}"))
 
-    win.player_page.shutdown()
+    win.player_tabs.close_all()
     win.thumbs.pool.waitForDone(3000)
     return _finish(results)
+
+
+def player_of(win, app, seconds: float = 8.0):
+    """Engine of the *active* tab, waiting for the deferred init to land.
+
+    Since playback became tab-based, every `open_player` can hand back a fresh
+    page whose mpv instance is created one event-loop tick later. Tests must
+    re-acquire the engine instead of caching the first one.
+    """
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        pump(app, 0.05)
+        page = win.player_page
+        if page is not None and page.player is not None:
+            return page.player
+    return None
 
 
 def wait_duration(player, app, below: float = 12.0, seconds: float = 8.0) -> float:
