@@ -1,8 +1,27 @@
 # 项目状态
 
-更新：2026-10-20（Phase 1 + 主题系统 + Phase 2 通用播放器 + 播放生命周期重构 + 第三轮体验/稳定性修复 + 启动脚本与打包方案）
+更新：2026-10-22（Phase 1 + 主题系统 + Phase 2 通用播放器 + 播放生命周期重构 + 第三/四轮体验与稳定性修复 + 启动脚本与打包方案 + 第五轮切主题崩溃修复）
 
 ## ✅ 已完成并通过验证
+
+### 第五轮：切主题崩溃 + 页面拆除（2026-10-21 ~ 22）
+- **用户报的「切几遍颜色就崩」已修复并复现验证**：关掉一个标签后再切主题，
+  必然在 `QApplication::setStyleSheet()` 内部访问违规（`probe_theme_leak.py 1 12` → 139）。
+  逐项关掉拆除步骤定位到元凶是"断开整棵子控件树的信号"，它连 Qt 在组合控件内部的
+  连接一起拆了。现在只断页面自身的信号，子控件整个销毁（`ui/qt_teardown.py`）
+- **拆穿一个长期假象**：`QObject.disconnect()` 零参数形式在 PySide6 里**根本不存在**，
+  抛 `TypeError` 被 `except TypeError` 吞掉 —— 原来的清理代码一次都没生效。
+  零参数形式只有 `SignalInstance`（`btn.clicked`）支持
+- **另一个假象是所有探针的"事件循环"**：`app.processEvents()` 循环不投递 DeferredDelete，
+  `deleteLater()` 永不生效，"页面没被释放"是测量误差。改用 `QEventLoop` 后全部归零，
+  并用 `shiboken6.isValid()` 判定
+- **结果**：关闭 4 个标签后页面残留 0/4；关标签后连切 12 次主题、开着视频连切 12 次主题、
+  `probe_theme_crash.py` 20 轮，全部 EXIT=0
+- **回归套件全绿**：`smoke_core` / `smoke_tabs` 25/25 / `smoke_playback` /
+  `smoke_containers` / `smoke_hidden_missing` / `smoke_gui` / `smoke_phase2` 19/19 /
+  `smoke_exit` 2/2 / `probe_mpv_lifecycle` 无残留线程
+- 新增探针：`probe_disconnect.py`、`probe_page_refs.py`、`probe_qss_crash.py`、
+  `probe_crash_bisect.py`；过程记录：`docs/devlog/007-*.md`
 
 ### 第四轮：启动脚本 + 打包方案（2026-10-20）
 - **`start.bat` / `debug.bat` / `setup.bat`**：双击启动、调试入口、一次性环境准备。

@@ -15,14 +15,16 @@ from __future__ import annotations
 import os
 import sys
 
-from PySide6.QtCore import QPoint, Qt, QTimer, Signal
+from PySide6.QtCore import QObject, QPoint, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QPainter
 from PySide6.QtWidgets import (QFileDialog, QFrame, QHBoxLayout, QLabel,
                                QListWidget, QListWidgetItem, QMenu,
                                QPushButton, QScrollArea, QSizePolicy,
                                QSlider, QStackedWidget, QVBoxLayout, QWidget)
 
+from ..core import diagnostics
 from ..media.player import MpvPlayer
+from . import qt_teardown as qt
 from . import theme as T
 from .widgets import ChipButton, human_time, timestamp_ms
 
@@ -436,7 +438,11 @@ class PlayerPage(QFrame):
     def _init_player(self):
         try:
             wid = int(self.video_host.winId())
-            self.player = MpvPlayer(wid=wid, hwdec=self.settings.get("hwdec", "auto"))
+            # Volume travels in as a construction option: writing it right
+            # after the engine existed raced the event thread (see MpvPlayer).
+            self.player = MpvPlayer(wid=wid,
+                                    hwdec=self.settings.get("hwdec", "auto"),
+                                    volume=int(self.settings.get("volume", 80)))
         except Exception as exc:
             self._show_overlay(f"播放引擎不可用\n{exc}")
             self.info_label.setText(f"播放引擎不可用：{exc}")
@@ -451,7 +457,7 @@ class PlayerPage(QFrame):
         p.osdText.connect(self.show_osd)
         p.fileLoaded.connect(lambda _p: self._on_file_loaded())
         p.volumeChanged.connect(lambda v: self.vol.setValue(int(v)))
-        p.set_volume(int(self.settings.get("volume", 80)))
+        self.vol.setValue(int(self.settings.get("volume", 80)))
         self._timer.start()
         # mpv has now attached its child window; make sure it covers the stage.
         self._sync_native_surface()
@@ -914,11 +920,50 @@ class PlayerPage(QFrame):
         """
         self._timer.stop()
         self._osd_timer.stop()
+        # Drop our ~11 entries from the theme registry *before* the C++ side
+        # goes away. The registry held them strongly, which kept this page (and
+        # the engine it owns) reachable long after the tab was closed.
+        T.unregister(self)
+        # Then cut every signal we own. Slots in this class are written as
+        # `lambda: self.…()`, which closes over `self` — the page ends up
+        # referencing itself, so it can never be collected and PySide6 never
+        # destroys its C++ object either. `deleteLater()` alone does not break
+        # that cycle; disconnecting does.
+        #
+        # It has to be done per SignalInstance: the blanket
+        # `QObject.disconnect()` raises TypeError in PySide6 (measured with
+        # tools/probe_disconnect.py), so the version of this loop that called it
+        # silently disconnected nothing at all.
+        #
+        # Only *our* signals, never the children's. Disarming every widget
+        # underneath took out the connections Qt makes inside its own composite
+        # widgets (scroll areas, item views, …) and the process then died of an
+        # access violation the next time the palette changed — reproduced with
+        # tools/probe_crash_bisect.py. The children do not need it: they are
+        # destroyed a few lines below, and a connection cannot outlive its
+        # sender.
+        cut = qt.disconnect_object(self)
+        diagnostics.note(f"page release: disconnected {cut} signals")
         page_player = self.player
         self.player = None
         self._player_ready = False
+        # Break the engine → closure → page cycle before the engine goes.
+        if page_player is not None:
+            page_player.disconnect_all()
         if page_player is not None:
             # shutdown() stops *and* terminates, and silences callbacks first —
             # a stop() here would emit end-file and could trigger auto-play on
-            # a tab that is being closed.
+            # a tab that is being closed. It has to run *before* we remove the
+            # native window: destroying the surface out from under a running
+            # engine is one of the ways this process used to die.
             page_player.shutdown()
+        # Finally drop the widget tree. Slots like
+        # `b.clicked.connect(lambda _=False, v=…: self.seek_to(v))` close over
+        # the page, so the page holds its children which hold the page. In
+        # PySide6 a C++ object is only destroyed once its Python wrapper is
+        # collected, and the wrapper can only be collected once that cycle is
+        # gone — so `deleteLater()` alone leaves the whole page (native video
+        # surface included) alive for the rest of the session. The handlers live
+        # on the C++ side where the garbage collector cannot see them, so the
+        # children themselves have to be destroyed to be sure.
+        qt.purge_children(self)

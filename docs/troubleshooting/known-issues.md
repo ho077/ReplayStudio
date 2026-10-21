@@ -136,8 +136,25 @@ UTF-8 会乱码；而且编辑工具往 GBK 文件里插中文可能写成 UTF-8
   `cmd /c` 会吃掉首尾引号，报 `'C:\path with space\exe" -c "import' 不是内部或外部命令`。
   改成先把输出重定向到临时文件，再 `set /p VAR=<file` 读回来。
 
+### 切换主题时崩溃 / 界面点不动（已修复，留档）
+关掉标签后切配色必崩，落在 `QApplication::setStyleSheet()` 内部（`faulthandler` 的
+`crash-*.log` 可直接看到）。根因是 `PlayerPage.release()` 里"断开整棵子控件树的信号"：
+那会连 Qt 建在组合控件内部（滚动区、列表视图）的连接一起断掉，下一次换样式表就踩野指针。
+现在只断**页面自身**的信号，子控件改为整个销毁 —— 连接活不过它的发送者，效果一样且安全。
+详见 `docs/devlog/007`；回归用 `tools/probe_crash_bisect.py`（含"没有 mpv 也照样崩"的对照）。
+
 ## Qt/PySide6 类（踩坑留档）
 
+- **`QObject.disconnect()` 零参数形式不存在**：调用抛
+  `TypeError: not enough arguments`，非常容易被 `except TypeError` 吞掉，
+  于是清理代码看起来在跑、实际一次没生效。零参数形式只在 **`SignalInstance`**
+  （`btn.clicked`）上有。见 `ui/qt_teardown.py::disconnect_object`。
+- **不要断开整个控件子树的信号**（见上一条崩溃）：会拆掉 Qt 内部连接。
+  要断开就断自己这一个，其余靠销毁。
+- **测生命周期必须用真实事件循环**。`app.processEvents()` 循环**不投递 DeferredDelete**，
+  于是 `deleteLater()` 永远不生效，任何"控件没被释放"的结论都是假的。用
+  `QEventLoop` + `QTimer.singleShot(ms, loop.quit)` + `loop.exec()`。
+  判定用 `shiboken6.isValid(obj)`，比"weakref 还在不在"准确得多。
 - `QImage.scaled()` 关键字参数是 `aspectMode`，**没有** `aspectRatioMode`；
   传错会在后台线程抛 AttributeError 被吞掉。一律用枚举：
   `Qt.AspectRatioMode.KeepAspectRatio`。

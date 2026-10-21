@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
+import warnings
 
 from PySide6.QtCore import QObject, Signal
 
@@ -69,7 +71,8 @@ class MpvPlayer(QObject):
     aspectDetected = Signal(float)
     osdText = Signal(str)
 
-    def __init__(self, wid: int | None = None, hwdec: str = "auto", parent=None):
+    def __init__(self, wid: int | None = None, hwdec: str = "auto",
+                 volume: int | None = None, parent=None):
         super().__init__(parent)
         ensure_mpv_dll()
         import mpv
@@ -79,6 +82,17 @@ class MpvPlayer(QObject):
             keep_open="always",
             idle="yes",
             osc="no",
+            # mpv embeds LuaJIT to run a dozen built-in scripts (osc,
+            # auto_profiles, ytdl_hook, stats, console, select ...). We ship our
+            # own controls, so none of them are wanted. They are not just dead
+            # weight: LuaJIT unwinds its stack by *raising an SEH exception*
+            # (0xe24c4a02 = LJ_EXCODE + LUA_ERRRUN) and catching it again. Our
+            # faulthandler installs a vectored exception handler that sees it
+            # first and walks the stacks — of a thread whose stack pointer
+            # LuaJIT is in the middle of rewriting. That is how crash dumps
+            # ended up containing "<invalid frame>" and the process died of an
+            # access violation shortly after. No scripts, no such exceptions.
+            load_scripts=False,
             input_default_bindings=False,
             input_vo_keyboard=False,
             force_window="no" if wid else "yes",
@@ -98,6 +112,13 @@ class MpvPlayer(QObject):
             demuxer_max_back_bytes=8 * 1024 * 1024,
             log_handler=self._log,
         )
+        # Initial volume is an *option*, not a property write. Setting it after
+        # `MPV()` returned put a synchronous `_set_property` on the GUI thread
+        # at the exact moment the engine's event thread was spinning up — the
+        # two raced and the process died there. As an option mpv applies it
+        # while initialising, before the event thread exists.
+        if volume is not None:
+            opts["volume"] = max(0, min(130, int(volume)))
         if wid:
             opts["wid"] = str(int(wid))
         self._mpv = mpv.MPV(**opts)
@@ -114,6 +135,20 @@ class MpvPlayer(QObject):
         # would fire `ended` for the same clip and auto-play would skip one
         # video. The latch is cleared every time a new file is loaded.
         self._ended_fired = False
+        # Mirror of everything the observers report. Property reads are the
+        # ones the UI hammers (the position timer alone asks 10x a second), and
+        # every `mpv.<prop>` is a *synchronous* round trip into the engine. If
+        # the engine is busy — or already gone — that call blocks the GUI
+        # thread ("点不动视频") and, in the crash reports, is exactly where the
+        # process dies. So reads answer from the mirror and never cross into
+        # libmpv; only writes do, and only when the value actually changes.
+        self._pos = 0.0
+        self._dur = 0.0
+        self._paused = True
+        self._vol = int(opts["volume"]) if volume is not None else 0
+        self._speed = 1.0
+        self._tracks: list[dict] = []
+        self._hwdec = ""
 
         self._mpv.observe_property("time-pos", self._guard(self._on_time_pos))
         self._mpv.observe_property("duration", self._guard(self._on_duration))
@@ -224,18 +259,22 @@ class MpvPlayer(QObject):
 
     def _on_time_pos(self, _name, value):
         if value is not None:
-            self.positionChanged.emit(float(value))
+            self._pos = float(value)
+            self.positionChanged.emit(self._pos)
 
     def _on_duration(self, _name, value):
         if value is not None:
-            self.durationChanged.emit(float(value))
+            self._dur = float(value)
+            self.durationChanged.emit(self._dur)
 
     def _on_pause(self, _name, value):
-        self.pausedChanged.emit(bool(value))
+        self._paused = bool(value)
+        self.pausedChanged.emit(self._paused)
 
     def _on_volume(self, _name, value):
         if value is not None:
-            self.volumeChanged.emit(int(value))
+            self._vol = int(value)
+            self.volumeChanged.emit(self._vol)
 
     def _on_mute(self, _name, value):
         self._muted = bool(value)
@@ -243,16 +282,21 @@ class MpvPlayer(QObject):
 
     def _on_speed(self, _name, value):
         if value is not None:
-            self.speedChanged.emit(float(value))
+            self._speed = float(value)
+            self.speedChanged.emit(self._speed)
 
     def _on_path(self, _name, value):
         if value:
             self._path = value
 
     def _on_hwdec(self, _name, value):
-        self.hwdecChanged.emit(str(value or "no"))
+        self._hwdec = str(value or "no")
+        self.hwdecChanged.emit(self._hwdec)
 
-    def _on_track_list(self, _name, _value):
+    def _on_track_list(self, _name, value):
+        # Value arrives as a list of dicts; keep it so `tracks` never has to
+        # ask the engine (see the mirror note in __init__).
+        self._tracks = [dict(t) for t in (value or [])]
         self.tracksChanged.emit()
 
     def _on_eof(self, _name, value):
@@ -278,6 +322,11 @@ class MpvPlayer(QObject):
         """Load and play. Optionally resume at `start_pos` seconds."""
         self._path = path
         self._ended_fired = False
+        # Clear the mirror: the observers only report once mpv has the new
+        # file, so stale duration/position/tracks otherwise stay on screen.
+        self._pos = 0.0
+        self._dur = 0.0
+        self._tracks = []
         try:
             # `start` is applied to the next loaded file — no race with loadfile.
             self._mpv.start = f"{float(start_pos)}" if start_pos else "none"
@@ -302,19 +351,15 @@ class MpvPlayer(QObject):
 
     @property
     def duration(self) -> float:
-        try:
-            return float(self._mpv.duration or 0.0)
-        except Exception:
-            return 0.0
+        return self._dur
 
     @property
     def position(self) -> float:
-        try:
-            return float(self._mpv.time_pos or 0.0)
-        except Exception:
-            return 0.0
+        return self._pos
 
     def seek(self, seconds: float, precise: bool = True):
+        if not self._alive:
+            return
         try:
             d = self.duration
             if d:
@@ -329,14 +374,17 @@ class MpvPlayer(QObject):
 
     @property
     def paused(self) -> bool:
-        try:
-            return bool(self._mpv.pause)
-        except Exception:
-            return True
+        return self._paused
 
     def set_paused(self, paused: bool):
+        if not self._alive:
+            return
+        want = bool(paused)
+        if want == self._paused:
+            return                      # already there: skip the round trip
         try:
-            self._mpv.pause = bool(paused)
+            self._mpv.pause = want
+            self._paused = want
         except Exception:
             pass
 
@@ -345,14 +393,21 @@ class MpvPlayer(QObject):
 
     @property
     def volume(self) -> int:
-        try:
-            return int(self._mpv.volume or 0)
-        except Exception:
-            return 0
+        return self._vol
 
     def set_volume(self, value: int):
+        if not self._alive:
+            return
+        want = max(0, min(130, int(value)))
+        # The engine reports its volume back, the UI mirrors it into the
+        # slider, and the slider's signal used to set it *again*. Echoing it
+        # straight back to mpv is what put a synchronous write on the GUI
+        # thread for every tick; a no-op write now stops at the mirror.
+        if want == self._vol:
+            return
         try:
-            self._mpv.volume = max(0, min(130, int(value)))
+            self._mpv.volume = want
+            self._vol = want
         except Exception:
             pass
 
@@ -361,8 +416,14 @@ class MpvPlayer(QObject):
         return self._muted
 
     def set_muted(self, muted: bool):
+        if not self._alive:
+            return
+        want = bool(muted)
+        if want == self._muted:
+            return
         try:
-            self._mpv.mute = bool(muted)
+            self._mpv.mute = want
+            self._muted = want
         except Exception:
             pass
 
@@ -376,18 +437,18 @@ class MpvPlayer(QObject):
         the track entirely and let mpv release the AO. The id is restored on
         resume, which keeps a manually chosen track intact.
         """
-        aid = ""
-        try:
-            aid = str(self._mpv.aid or "")
-        except Exception:
-            pass
+        if not self._alive:
+            return ""
+        aid = self.current_audio()
         try:
             self._mpv.aid = "no"
         except Exception:
             pass
-        return aid
+        return "" if aid is None else str(aid)
 
     def resume_audio(self, aid: str = ""):
+        if not self._alive:
+            return
         try:
             self._mpv.aid = aid or "auto"
         except Exception:
@@ -395,24 +456,24 @@ class MpvPlayer(QObject):
 
     @property
     def speed(self) -> float:
-        try:
-            return float(self._mpv.speed or 1.0)
-        except Exception:
-            return 1.0
+        return self._speed
 
     def set_speed(self, value: float):
+        if not self._alive:
+            return
+        want = float(value)
+        if abs(want - self._speed) < 1e-6:
+            return
         try:
-            self._mpv.speed = float(value)
+            self._mpv.speed = want
+            self._speed = want
         except Exception:
             pass
 
     # ---------------------------------------------------------------- tracks
     @property
     def tracks(self):
-        try:
-            return list(self._mpv.track_list) or []
-        except Exception:
-            return []
+        return list(self._tracks)
 
     def audio_tracks(self):
         return [t for t in self.tracks if t.get("type") == "audio"]
@@ -421,6 +482,8 @@ class MpvPlayer(QObject):
         return [t for t in self.tracks if t.get("type") == "sub"]
 
     def select_audio(self, track_id: int):
+        if not self._alive:
+            return
         try:
             self._mpv.aid = int(track_id)
         except Exception:
@@ -428,6 +491,8 @@ class MpvPlayer(QObject):
 
     def select_subtitle(self, track_id):
         """track_id None/False disables subtitles."""
+        if not self._alive:
+            return
         try:
             if not track_id:
                 self._mpv.sid = "no"
@@ -485,18 +550,29 @@ class MpvPlayer(QObject):
         return f"#{track_id}"
 
     def current_audio(self):
-        try:
-            v = self._mpv.aid
-            return None if v in (None, False, "no") else int(v)
-        except Exception:
-            return None
+        return self._selected_track("audio")
 
     def current_subtitle(self):
-        try:
-            v = self._mpv.sid
-            return None if v in (None, False, "no") else int(v)
-        except Exception:
+        return self._selected_track("sub")
+
+    def _selected_track(self, kind: str):
+        """Which track of `kind` mpv has selected, straight from the mirror.
+
+        Reading `aid`/`sid` off the engine instead put a synchronous call on
+        the GUI thread inside `_on_tracks`, i.e. on every single file load.
+        """
+        if not self._alive:
             return None
+        for t in self._tracks:
+            if t.get("type") == kind and t.get("selected"):
+                tid = t.get("id")
+                if tid is None:
+                    return None
+                try:
+                    return int(tid)
+                except (TypeError, ValueError):
+                    return None
+        return None
 
     def add_subtitle(self, path: str):
         try:
@@ -570,24 +646,70 @@ class MpvPlayer(QObject):
             return False
 
     def hwdec_current(self) -> str:
-        try:
-            return str(self._mpv.hwdec_current or "")
-        except Exception:
-            return ""
+        return self._hwdec
+
+    def disconnect_all(self):
+        """Cut every signal this engine exposes.
+
+        PlayerPage connects `lambda _p: self._on_file_loaded()` to `fileLoaded`,
+        so the engine ends up holding a closure over the page that owns it —
+        a cycle the garbage collector cannot break, because the C++ side is
+        part of it too. The page then never gets collected and PySide6 never
+        destroys it. Disconnecting is what actually releases it.
+        """
+        for name in ("positionChanged", "durationChanged", "pausedChanged",
+                     "fileLoaded", "ended", "errorOccurred", "volumeChanged",
+                     "mutedChanged", "speedChanged", "tracksChanged",
+                     "hwdecChanged", "aspectDetected", "osdText"):
+            signal = getattr(self, name, None)
+            if signal is None:
+                continue
+            try:
+                with warnings.catch_warnings():
+                    # PySide6 logs "Failed to disconnect (None)" for a signal
+                    # nobody ever connected. That is not worth filling the
+                    # console — we are clearing all of them unconditionally.
+                    warnings.simplefilter("ignore", RuntimeWarning)
+                    signal.disconnect()
+            except (RuntimeError, TypeError):
+                pass
 
     def shutdown(self):
         """Stop decoding and tear the instance down.
 
-        `command("stop")` first releases the audio device and the video output
-        *before* the event thread is joined, which avoids the engine being torn
-        down mid-frame. `_alive` goes down first so any callback that already
-        queued up becomes a no-op. Safe to call more than once.
+        Order matters, and the naive order crashes. python-mpv's `terminate()`
+        calls `mpv_terminate_destroy()` first and only *then* joins the event
+        thread — so whenever that thread happened to be mid-callback (dispatching
+        a property change, unwinding a LuaJIT trace) the handle was freed underneath
+        it, and the process died with an access violation right there. Closing a
+        tab was a coin flip; measured at roughly one crash in three.
+
+        So: stop playback, then ask mpv to shut itself down and *wait for its
+        event thread to leave the loop*, and only then destroy. By the time
+        `terminate()` runs there is nobody left holding the handle.
+        `_alive` goes down first so any callback that already queued up becomes
+        a no-op. Safe to call more than once.
         """
         self._alive = False
         try:
             self._mpv.command("stop")
         except Exception:
             pass
+        # 1. Ask mpv to shut itself down. Its event thread then handles
+        #    SHUTDOWN, which ends with it destroying its own event handle.
+        try:
+            self._mpv.quit()
+        except Exception:
+            pass
+        # 2. Wait for *that thread*, not for the event. `wait_for_shutdown()`
+        #    also reads from the event handle, so it races the thread that is
+        #    destroying it — which crashed here too. Joining touches nothing.
+        #    Bounded: a wedged engine must not stall the GUI thread.
+        thread = getattr(self._mpv, "_event_thread", None)
+        if thread is not None and thread.is_alive() \
+                and thread is not threading.current_thread():
+            thread.join(1.5)
+        # 3. Now nothing is inside the handle any more.
         try:
             self._mpv.terminate()
         except Exception:

@@ -10,8 +10,11 @@ Adding a theme = adding one Palette. No other file changes.
 """
 from __future__ import annotations
 
+import weakref
 from dataclasses import asdict, dataclass, replace
 from string import Template
+
+from PySide6.QtCore import Qt
 
 
 @dataclass(frozen=True)
@@ -205,7 +208,11 @@ def qalpha(color: str, alpha: str) -> str:
 
 
 # ------------------------------------------------------------- dynamic styling
-_STYLED: list[tuple[object, str]] = []
+# Weak refs, deliberately. Holding widgets strongly made the registry own a
+# whole PlayerPage: a closed tab could never be collected, so its mpv engine
+# stayed mounted for the session. The registry grows by ~11 entries per tab and
+# nothing ever pruned it — measured with tools/probe_theme_leak.py.
+_STYLED: list[tuple[weakref.ref, str]] = []
 
 
 def style(widget, template: str):
@@ -214,10 +221,36 @@ def style(widget, template: str):
     Uses `string.Template` rather than `str.format` because Qt stylesheets are
     full of literal braces (`QPushButton { … }`) that `format` would choke on.
     """
-    _STYLED[:] = [pair for pair in _STYLED if pair[0] is not widget]
+    ref = weakref.ref(widget)
+    _STYLED[:] = [pair for pair in _STYLED if pair[0]() is not widget]
     widget.setStyleSheet(_render(template))
-    _STYLED.append((widget, template))
+    _STYLED.append((ref, template))
     return widget
+
+
+def unregister(widget) -> int:
+    """Forget `widget` and every registered style underneath it.
+
+    Called when a page is torn down; without it the entries linger until the
+    next theme switch happens to notice the C++ object is gone.
+    """
+    keep: list[tuple[weakref.ref, str]] = []
+    dropped = 0
+    for ref, tpl in _STYLED:
+        w = ref()
+        if w is None:
+            dropped += 1
+            continue
+        try:
+            if w is widget or widget.isAncestorOf(w):
+                dropped += 1
+                continue
+        except RuntimeError:              # C++ half already gone
+            dropped += 1
+            continue
+        keep.append((ref, tpl))
+    _STYLED[:] = keep
+    return dropped
 
 
 def _render(template: str) -> str:
@@ -245,17 +278,25 @@ def apply_theme(app, key: str):
     _publish(palette(_CURRENT_KEY))
 
     alive = []
-    for widget, tpl in _STYLED:
+    for ref, tpl in _STYLED:
+        w = ref()
+        if w is None:
+            continue
         try:
-            widget.setStyleSheet(_render(tpl))
-            alive.append((widget, tpl))
+            w.setStyleSheet(_render(tpl))
         except RuntimeError:            # underlying C++ object already deleted
             continue
+        alive.append((ref, tpl))
     _STYLED[:] = alive
 
     if app is not None:
         app.setStyleSheet(QSS)
         for w in app.allWidgets():
+            # Never polish a native window. Those are the surfaces mpv draws
+            # into; unpolish/polish makes Qt rework the HWND and mpv ends up
+            # rendering into a window that is no longer on screen.
+            if w.testAttribute(Qt.WidgetAttribute.WA_NativeWindow):
+                continue
             w.style().unpolish(w)
             w.style().polish(w)
     return _CURRENT_KEY

@@ -18,6 +18,7 @@ noise at the same time.
 from __future__ import annotations
 
 import os
+import weakref
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (QFrame, QLabel, QStackedWidget, QTabBar,
@@ -213,8 +214,29 @@ class PlayerTabs(QFrame):
         btn.setFixedSize(18, 18)
         btn.setFocusPolicy(Qt.NoFocus)
         btn.setToolTip("关闭该标签（Ctrl+W）")
-        btn.clicked.connect(lambda _=False, p=page: self.close_page(p))
+        btn.clicked.connect(self._slot(page, lambda p: self.close_page(p)))
         return btn
+
+    @staticmethod
+    def _slot(page: PlayerPage, callback):
+        """Bind `callback(page, ...)` as a slot without keeping the page alive.
+
+        Writing ``lambda p=page: ...`` stores the page in the function's
+        ``__defaults__`` — a strong reference held for as long as the slot
+        exists, and these slots live on PlayerTabs, i.e. as long as the window.
+        Because a Python wrapper still referenced the page, PySide6 never
+        destroyed its C++ object, so the signal connections were never torn
+        down either, which is what kept the references alive. A neat loop:
+        every tab ever opened stayed valid (measured: 3 closed tabs, 3 still
+        alive) along with its native video surface.
+        """
+        ref = weakref.ref(page)
+
+        def slot(*args):
+            p = ref()
+            if p is not None:
+                callback(p, *args)
+        return slot
 
     def _wire(self, page: PlayerPage):
         """Route one tab's signals outward — but only while it is focused.
@@ -224,18 +246,20 @@ class PlayerTabs(QFrame):
         it to the *active* tab, and auto-play skipped a video. Each connection
         carries its source page so the check stays attached to the right tab.
         """
-        page.backRequested.connect(lambda p=page: self.close_page(p))
-        page.rowChanged.connect(lambda _r, p=page: self._retitle(p))
+        page.backRequested.connect(self._slot(page, lambda p: self.close_page(p)))
+        page.rowChanged.connect(self._slot(page, lambda p, _r: self._retitle(p)))
         page.positionReported.connect(
-            lambda vid, pos, dur, p=page: self._relay(p, self.positionReported, vid, pos, dur))
+            self._slot(page, lambda p, vid, pos, dur:
+                       self._relay(p, self.positionReported, vid, pos, dur)))
         page.fileDropped.connect(
-            lambda path, p=page: self._relay(p, self.fileDropped, path))
+            self._slot(page, lambda p, path: self._relay(p, self.fileDropped, path)))
         page.prevRequested.connect(
-            lambda p=page: self._relay(p, self.prevRequested))
+            self._slot(page, lambda p: self._relay(p, self.prevRequested)))
         page.nextRequested.connect(
-            lambda p=page: self._relay(p, self.nextRequested))
+            self._slot(page, lambda p: self._relay(p, self.nextRequested)))
         page.playlistIndexSelected.connect(
-            lambda i, p=page: self._relay(p, self.playlistIndexSelected, int(i)))
+            self._slot(page, lambda p, i:
+                       self._relay(p, self.playlistIndexSelected, int(i))))
 
     def _relay(self, page: PlayerPage, signal, *args):
         """Forward only if `page` is the one the user is looking at."""
