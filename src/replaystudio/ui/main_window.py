@@ -100,7 +100,7 @@ class MainWindow(QMainWindow):
     def _build_pages(self):
         self.moments = MomentsPage(self.db, self.thumbs, self)
         self.local = LocalPage(self.db, self.thumbs, self)
-        self.record = RecordPage(self.db, self)
+        self.record = RecordPage(self.db, self.settings, self)
         self.favorites = SimpleGridPage(self.db, self.thumbs, "favorites", self)
         self.recent = SimpleGridPage(self.db, self.thumbs, "recent", self)
         self.settings_page = SettingsPage(self.db, self.settings, self)
@@ -125,6 +125,9 @@ class MainWindow(QMainWindow):
         self.settings_page.recheckRequested.connect(self.recheck_files)
         self.settings_page.dirChanged.connect(lambda _d: self.start_scan(False))
         self.settings_page.listChanged.connect(self._reload_all_grids)
+        # a finished recording lands in the same library, so refresh the grids
+        self.record.recorded.connect(lambda _p: self._reload_all_grids())
+        self.record.statusMessage.connect(self.set_status)
 
         self.player_tabs.positionReported.connect(self._record_position)
         self.player_tabs.fileDropped.connect(lambda p: self.open_paths([p]))
@@ -511,6 +514,12 @@ class MainWindow(QMainWindow):
         # chance to render into a window that is being torn down (the likely
         # cause of the silent crash we were chasing).
         self.player_tabs.close_all()
+        # OBS outlives us otherwise; closing it here also keeps it from leaving
+        # a stale run marker behind (which would make the next launch complain).
+        try:
+            self.record.close_down()
+        except Exception:  # noqa: BLE001
+            pass
         self.thumbs.pool.waitForDone(3000)
         diagnostics.note("window closed")
         super().closeEvent(e)

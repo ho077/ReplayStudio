@@ -19,15 +19,26 @@ DEFAULTS = {
     # Clips whose source file no longer exists stay in the index but are hidden
     # from every listing unless the user asks to see them.
     "show_missing_files": 0,
+    # Phase 3: recording
+    "record_dir": "",                 # empty = obs_paths.default_record_dir()
+    "record_kind": "monitor_capture", # monitor_capture | window_capture | game_capture
+    "record_window": "",
+    "record_cursor": 1,
+    "record_desktop_audio": 1,
+    "record_mic": 0,
+    "record_format": "hybrid_mp4",  # SimpleOutput/RecFormat2; see recording.CONTAINERS
 }
 
 
 class Settings(dict):
     def __init__(self, db):
-        super().__init__()
+        # Seed from DEFAULTS through dict's own constructor, NOT via self[k] = v:
+        # __setitem__ saves on every assignment, so filling the defaults one by
+        # one would overwrite the stored user settings with a half-built dict —
+        # and the read-back below would then find only defaults. (Measured: every
+        # setting appeared to be forgotten on the next start.)
         self.db = db
-        for k, v in DEFAULTS.items():
-            self[k] = v
+        super().__init__(DEFAULTS)
         raw = db.get_setting("settings_json", "")
         if raw:
             try:

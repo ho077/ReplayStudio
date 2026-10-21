@@ -192,10 +192,10 @@ class ObsClient(QObject):
             self._send_identify(d)
         elif op == IDENTIFIED:
             self.state = "ready"
-            self.server = {
-                "obsWebSocketVersion": d.get("negotiatedRpcVersion") and str(d.get("negotiatedRpcVersion")) or "",
-                "rpcVersion": d.get("negotiatedRpcVersion", RPC_VERSION),
-            }
+            # Identified only carries the negotiated RPC version — reporting that
+            # as the software version made the UI claim "obs-websocket 1". The
+            # real version comes from GetVersion.
+            self.server = {"rpcVersion": d.get("negotiatedRpcVersion", RPC_VERSION)}
             self.identified.emit(self.server)
         elif op == EVENT:
             self.eventReceived.emit(d.get("eventType", ""), d.get("eventData") or {})
