@@ -149,20 +149,29 @@ def main() -> int:
 
     # ------------------------------------- 1b mpv surface pinned to its host
     # Reported: the *first* video was drawn off-centre. Root cause was the mpv
-    # host's native HWND sitting offset inside its parent, because Qt created it
-    # before layout settled. Invariant: the HWND rect must equal the parent's
-    # client rect exactly (offset 0,0, same size).
+    # host's native HWND sitting somewhere other than where Qt thinks the
+    # widget is, because Qt created it before layout settled.
+    #
+    # The invariant is "the HWND sits where Qt says the widget is", and it has
+    # to be measured *without* touching the parent: calling
+    # `parentWidget().winId()` forces Qt to give that widget a real HWND, and
+    # re-parenting the surface underneath the measurement is exactly how this
+    # assertion ended up reporting a 283 px offset that nobody could see on
+    # screen. `mapToGlobal` never creates a window, so it is safe to ask.
     def surface_offsets() -> list[tuple[str, int, int, int, int]]:
         out = []
         for i, pg in enumerate(tabs.pages()):
             host = pg.video_host
             if not host.isVisible():
                 continue
-            hwnd = int(host.winId())
-            hx, hy = win_rect(hwnd)[:2]
-            px, py, pw, ph = client_rect(int(host.parentWidget().winId()))
-            hw, hh = win_rect(hwnd)[2:]
-            out.append((f"tab{i}", hx - px, hy - py, pw - hw, ph - hh))
+            hx, hy, hw, hh = win_rect(int(host.winId()))
+            dpr = host.devicePixelRatioF() or 1.0
+            want = host.mapToGlobal(host.rect().topLeft())
+            out.append((f"tab{i}",
+                        hx - int(round(want.x() * dpr)),
+                        hy - int(round(want.y() * dpr)),
+                        int(round(host.width() * dpr)) - hw,
+                        int(round(host.height() * dpr)) - hh))
         return out
 
     pump(app, 0.4)

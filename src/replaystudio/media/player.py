@@ -149,6 +149,13 @@ class MpvPlayer(QObject):
         self._speed = 1.0
         self._tracks: list[dict] = []
         self._hwdec = ""
+        # Same mirror for the settings the UI reaches for on every file load
+        # and every menu opening. `_on_file_loaded` alone used to put a
+        # synchronous `sub-delay` write on the GUI thread once per clip.
+        self._sub_delay = 0.0
+        self._audio_delay = 0.0
+        self._sub_visible = True
+        self._sub_scale = 1.0
 
         self._mpv.observe_property("time-pos", self._guard(self._on_time_pos))
         self._mpv.observe_property("duration", self._guard(self._on_duration))
@@ -317,9 +324,41 @@ class MpvPlayer(QObject):
             except (TypeError, ValueError):
                 pass
 
+    # --------------------------------------------------------- writing to mpv
+    def _write(self, name: str, value) -> None:
+        """Change a property **without** waiting for the engine to answer.
+
+        `mpv.<prop> = value` is `mpv_set_property`, i.e. a synchronous round
+        trip into the core, and every one of these is called from the GUI
+        thread: pausing, parking a tab, moving the volume slider. If the core is
+        busy — finishing a load, or being torn down by another thread — the
+        caller blocks inside libmpv. That is the "点不动视频" report, and the
+        crash logs back it up: the faulting runs all have the GUI thread parked
+        in python-mpv's `_set_property` while an engine thread is unwinding.
+
+        `set` through `command_async` posts the change and returns at once.
+        Booleans have to become mpv's `yes`/`no`; everything else stringifies.
+        Falls back to the synchronous form only if the async path is unusable
+        (core already gone), where the write would be a no-op anyway.
+        """
+        if not self._alive:
+            return
+        text = ("yes" if value else "no") if isinstance(value, bool) else str(value)
+        try:
+            self._mpv.command_async("set", name, text)
+            return
+        except Exception:
+            pass
+        try:
+            setattr(self._mpv, name.replace("-", "_"), value)
+        except Exception:
+            pass
+
     # -------------------------------------------------------------- controls
     def play(self, path: str, start_pos: float | None = None):
         """Load and play. Optionally resume at `start_pos` seconds."""
+        if not self._alive:
+            return
         self._path = path
         self._ended_fired = False
         # Clear the mirror: the observers only report once mpv has the new
@@ -329,19 +368,21 @@ class MpvPlayer(QObject):
         self._tracks = []
         try:
             # `start` is applied to the next loaded file — no race with loadfile.
-            self._mpv.start = f"{float(start_pos)}" if start_pos else "none"
+            self._write("start", f"{float(start_pos)}" if start_pos else "none")
             self._mpv.play(path)
             # With `keep_open=always`, mpv sets `pause=yes` when a clip reaches
             # its end and KEEPS that state for the next loadfile. Without this
             # reset, auto-play would open the next video frozen on its first
             # frame and never advance — the user sees "自动连播没反应".
-            self._mpv.pause = False
+            self._write("pause", False)
         except Exception as exc:
             self.errorOccurred.emit(f"无法播放 {os.path.basename(path)}：{exc}")
 
     def stop(self):
+        if not self._alive:
+            return
         try:
-            self._mpv.command("stop")
+            self._mpv.command_async("stop")
         except Exception:
             pass
 
@@ -382,11 +423,8 @@ class MpvPlayer(QObject):
         want = bool(paused)
         if want == self._paused:
             return                      # already there: skip the round trip
-        try:
-            self._mpv.pause = want
-            self._paused = want
-        except Exception:
-            pass
+        self._paused = want
+        self._write("pause", want)
 
     def toggle_pause(self):
         self.set_paused(not self.paused)
@@ -405,11 +443,8 @@ class MpvPlayer(QObject):
         # thread for every tick; a no-op write now stops at the mirror.
         if want == self._vol:
             return
-        try:
-            self._mpv.volume = want
-            self._vol = want
-        except Exception:
-            pass
+        self._vol = want
+        self._write("volume", want)
 
     @property
     def muted(self) -> bool:
@@ -421,11 +456,8 @@ class MpvPlayer(QObject):
         want = bool(muted)
         if want == self._muted:
             return
-        try:
-            self._mpv.mute = want
-            self._muted = want
-        except Exception:
-            pass
+        self._muted = want
+        self._write("mute", want)
 
     def suspend_audio(self) -> str:
         """Turn the audio track off and return the id that was playing.
@@ -440,19 +472,11 @@ class MpvPlayer(QObject):
         if not self._alive:
             return ""
         aid = self.current_audio()
-        try:
-            self._mpv.aid = "no"
-        except Exception:
-            pass
+        self._write("aid", "no")
         return "" if aid is None else str(aid)
 
     def resume_audio(self, aid: str = ""):
-        if not self._alive:
-            return
-        try:
-            self._mpv.aid = aid or "auto"
-        except Exception:
-            pass
+        self._write("aid", aid or "auto")
 
     @property
     def speed(self) -> float:
@@ -464,11 +488,8 @@ class MpvPlayer(QObject):
         want = float(value)
         if abs(want - self._speed) < 1e-6:
             return
-        try:
-            self._mpv.speed = want
-            self._speed = want
-        except Exception:
-            pass
+        self._speed = want
+        self._write("speed", want)
 
     # ---------------------------------------------------------------- tracks
     @property
@@ -482,24 +503,11 @@ class MpvPlayer(QObject):
         return [t for t in self.tracks if t.get("type") == "sub"]
 
     def select_audio(self, track_id: int):
-        if not self._alive:
-            return
-        try:
-            self._mpv.aid = int(track_id)
-        except Exception:
-            pass
+        self._write("aid", int(track_id))
 
     def select_subtitle(self, track_id):
         """track_id None/False disables subtitles."""
-        if not self._alive:
-            return
-        try:
-            if not track_id:
-                self._mpv.sid = "no"
-            else:
-                self._mpv.sid = int(track_id)
-        except Exception:
-            pass
+        self._write("sid", int(track_id) if track_id else "no")
 
     def cycle_subtitle(self, forward: bool = True):
         """Step through subtitle tracks (… → off → track1 → track2 → …)."""
@@ -575,72 +583,72 @@ class MpvPlayer(QObject):
         return None
 
     def add_subtitle(self, path: str):
+        if not self._alive:
+            return
         try:
-            self._mpv.command("sub-add", path, "select")
+            self._mpv.command_async("sub-add", path, "select")
             self.tracksChanged.emit()
         except Exception as exc:
             self.errorOccurred.emit(f"字幕加载失败：{exc}")
 
     # ------------------------------------------------------- subtitle geometry
+    # Every one of these used to read or write the property straight through to
+    # the engine. A write is a synchronous round trip on whichever thread calls
+    # it — and these are called from the GUI thread (menu building, file load),
+    # which is what makes the interface stop responding while mpv is busy.
     @property
     def sub_delay(self) -> float:
-        try:
-            return float(self._mpv.sub_delay or 0.0)
-        except Exception:
-            return 0.0
+        return self._sub_delay
 
     def set_sub_delay(self, seconds: float):
-        try:
-            self._mpv.sub_delay = float(seconds)
-            self.osdText.emit(f"字幕延迟 {seconds:+.1f}s")
-        except Exception:
-            pass
+        want = float(seconds)
+        if abs(want - self._sub_delay) < 1e-4:
+            return
+        self._sub_delay = want
+        self._write("sub-delay", want)
+        self.osdText.emit(f"字幕延迟 {want:+.1f}s")
 
     @property
     def audio_delay(self) -> float:
-        try:
-            return float(self._mpv.audio_delay or 0.0)
-        except Exception:
-            return 0.0
+        return self._audio_delay
 
     def set_audio_delay(self, seconds: float):
-        try:
-            self._mpv.audio_delay = float(seconds)
-            self.osdText.emit(f"音轨延迟 {seconds:+.1f}s")
-        except Exception:
-            pass
+        want = float(seconds)
+        if abs(want - self._audio_delay) < 1e-4:
+            return
+        self._audio_delay = want
+        self._write("audio-delay", want)
+        self.osdText.emit(f"音轨延迟 {want:+.1f}s")
 
     def set_sub_visible(self, visible: bool):
-        try:
-            self._mpv.sub_visibility = bool(visible)
-        except Exception:
-            pass
+        want = bool(visible)
+        if want == self._sub_visible:
+            return
+        self._sub_visible = want
+        self._write("sub-visibility", want)
 
     def set_sub_scale(self, scale: float):
-        try:
-            self._mpv.sub_scale = float(scale)
-        except Exception:
-            pass
+        want = float(scale)
+        if abs(want - self._sub_scale) < 1e-4:
+            return
+        self._sub_scale = want
+        self._write("sub-scale", want)
 
     # ------------------------------------------------------------------ aspect
     def set_aspect(self, value: str):
         """`value` is '-1' (auto/source), 'no' (fit window) or e.g. '16:9'."""
-        try:
-            self._mpv.video_aspect_override = value
-            label = {"-1": "原始比例", "no": "拉伸填满"}.get(value, value)
-            self.osdText.emit(f"画面比例：{label}")
-        except Exception:
-            pass
+        self._write("video-aspect-override", value)
+        label = {"-1": "原始比例", "no": "拉伸填满"}.get(value, value)
+        self.osdText.emit(f"画面比例：{label}")
 
     def set_fullscreen(self, on: bool):
-        try:
-            self._mpv.fullscreen = bool(on)
-        except Exception:
-            pass
+        self._write("fullscreen", bool(on))
 
     def screenshot(self, path: str):
+        if not self._alive:
+            return False
         try:
-            self._mpv.command("screenshot-to-file", path, "video")
+            self._mpv.command_async("screenshot-to-file", path, "video")
             return True
         except Exception:
             return False
@@ -692,7 +700,7 @@ class MpvPlayer(QObject):
         """
         self._alive = False
         try:
-            self._mpv.command("stop")
+            self._mpv.command_async("stop")
         except Exception:
             pass
         # 1. Ask mpv to shut itself down. Its event thread then handles

@@ -398,30 +398,46 @@ class PlayerPage(QFrame):
         renders into that offset rectangle — the "first video is not centred"
         report. Re-asserting the rect afterwards is cheap and idempotent, and
         it also covers window moves and DPI changes.
+
+        The coordinates must be expressed against the HWND that Windows
+        actually made the parent of ours, which is *not* necessarily
+        ``host.parentWidget()``. With ``WA_DontCreateNativeAncestors`` Qt skips
+        intermediate widgets, so the real parent HWND is the nearest native
+        ancestor — sometimes the top-level window. Passing coordinates
+        measured against ``stage`` moved the surface to the top-left of the
+        window instead: tools/probe_surface_offset.py shows a manual call
+        *creating* a (-282,-148) offset that later corrects itself. So: go via
+        screen coordinates and let Windows convert.
         """
         if sys.platform != "win32":
             return
         host = self.video_host
         if not host.testAttribute(Qt.WidgetAttribute.WA_NativeWindow):
             return
-        parent = host.parentWidget()
-        if parent is None or not host.isVisible():
+        if not host.isVisible():
             return
         try:
             import ctypes
             from ctypes import wintypes
 
             user32 = ctypes.WinDLL("user32", use_last_error=True)
-            hwnd = int(host.winId())
+            user32.GetParent.restype = wintypes.HWND
+            user32.ScreenToClient.argtypes = [wintypes.HWND,
+                                              ctypes.POINTER(wintypes.POINT)]
+            hwnd = wintypes.HWND(int(host.winId()))
+            parent_hwnd = user32.GetParent(hwnd)
+            if not parent_hwnd:
+                return
             dpr = host.devicePixelRatioF() or 1.0
-            off = host.mapTo(parent, QPoint(0, 0))
-            x = int(round(off.x() * dpr))
-            y = int(round(off.y() * dpr))
+            top_left = host.mapToGlobal(QPoint(0, 0))
+            pt = wintypes.POINT(int(round(top_left.x() * dpr)),
+                                int(round(top_left.y() * dpr)))
+            user32.ScreenToClient(parent_hwnd, ctypes.byref(pt))
             w = max(1, int(round(host.width() * dpr)))
             h = max(1, int(round(host.height() * dpr)))
             SWP_NOZORDER = 0x0004
             SWP_NOACTIVATE = 0x0010
-            user32.SetWindowPos(wintypes.HWND(hwnd), 0, x, y, w, h,
+            user32.SetWindowPos(hwnd, 0, pt.x, pt.y, w, h,
                                 SWP_NOZORDER | SWP_NOACTIVATE)
         except Exception:
             # Never let a cosmetic fix break playback.

@@ -143,6 +143,20 @@ UTF-8 会乱码；而且编辑工具往 GBK 文件里插中文可能写成 UTF-8
 现在只断**页面自身**的信号，子控件改为整个销毁 —— 连接活不过它的发送者，效果一样且安全。
 详见 `docs/devlog/007`；回归用 `tools/probe_crash_bisect.py`（含"没有 mpv 也照样崩"的对照）。
 
+### 界面偶发卡死 / 「点不动」（已修复，留档）
+`mpv.<prop> = v` 是**同步往返**（`mpv_set_property`）。pause / mute / volume /
+park 时的 `aid=no` 全都从 GUI 线程发出，引擎忙时调用方就卡在 libmpv 里。
+现在统一走 `MpvPlayer._write()` → `command_async("set", …)`，投递即返回。
+详见 `docs/devlog/007` 第 5.1 节。
+
+### 日志里反复出现 `0xe24c4a02` / `<invalid frame>`（不是崩溃原因）
+这是 **LuaJIT 用"抛 SEH 异常再自己接住"来展开栈**，libmpv 内部常态发生，本身无害。
+`--load-scripts=no` 实测关不掉它。危险的是 `faulthandler.enable(all_threads=True)`：
+它的 VEH 排在 LuaJIT 前面，每次都要遍历**所有线程**的栈，而那个线程正被 LuaJIT 改写
+栈指针 —— dump 出现 `<invalid frame>` 之后往往就是一次真实的访问违规。
+现在 `diagnostics.install()` 用 `all_threads=False`，只 dump 出错的那一个线程。
+**排查时不要把这个码当成根因。**
+
 ## Qt/PySide6 类（踩坑留档）
 
 - **`QObject.disconnect()` 零参数形式不存在**：调用抛

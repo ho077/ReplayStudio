@@ -70,9 +70,19 @@ def install(app=None) -> Path | None:
     # ---- 1. native faults -------------------------------------------------
     try:
         _crash_file = open(directory / f"crash-{stamp}.log", "w", encoding="utf-8")
-        # all_threads=True dumps every thread, which is what you need when the
-        # fault happens on mpv's event thread rather than the GUI thread.
-        faulthandler.enable(file=_crash_file, all_threads=True)
+        # Deliberately NOT all_threads=True. See the long note in
+        # docs/devlog/007: libmpv raises 0xe24c4a02 (LuaJIT unwinding its stack)
+        # routinely and handles it itself. faulthandler's vectored exception
+        # handler sees it first and walks *every* thread's stack — including
+        # the one whose stack pointer LuaJIT is in the middle of rewriting.
+        # Those dumps are full of "<invalid frame>" and the process was dying
+        # of an access violation right after them, which is how most of this
+        # project's "random" crashes actually happened.
+        #
+        # Dumping only the faulting thread keeps the handler useful for real
+        # faults — the faulting thread is the one you want anyway — without
+        # touching the others.
+        faulthandler.enable(file=_crash_file, all_threads=False)
     except (OSError, RuntimeError):
         _crash_file = None
 
