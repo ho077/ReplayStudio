@@ -115,35 +115,55 @@ class MomentsPage(QFrame):
         self._debounce_timer.start(320)
 
     # ------------------------------------------------------------------ filters
-    def refresh_facets(self):
-        acc_rows = self.db.list_accounts()
-        self.cb_account.blockSignals(True)
-        cur = self.cb_account.currentData()
-        self.cb_account.clear()
-        self.cb_account.addItem("全部账号", "")
-        for a in acc_rows:
-            label = f"{a['nick']}#{a['tag']}" if a["nick"] else f"账号 {a['openid']}"
-            self.cb_account.addItem(label, a["openid"])
-        if cur:
-            i = self.cb_account.findData(cur)
-            if i >= 0:
-                self.cb_account.setCurrentIndex(i)
-        self.cb_account.blockSignals(False)
+    def refresh_facets(self, accounts: bool = True):
+        """Rebuild the filter combo boxes.
 
-        fac = self.db.facets(self.cb_account.currentData() or None)
+        The counts depend on the *other* filters currently picked, not just on
+        the index, so they are refreshed on every `reload()` — otherwise
+        "霓虹町 (154)" keeps promising the unfiltered total while the grid,
+        honouring 仅我的击杀/死亡 or the search box, lists 153.
+
+        `accounts=False` leaves the account list alone: it only changes when a
+        scan runs, and rebuilding it on every keystroke would throw away the
+        user's selection for nothing.
+        """
+        if accounts:
+            acc_rows = self.db.list_accounts()
+            self.cb_account.blockSignals(True)
+            cur = self.cb_account.currentData()
+            self.cb_account.clear()
+            self.cb_account.addItem("全部账号", "")
+            for a in acc_rows:
+                label = f"{a['nick']}#{a['tag']}" if a["nick"] else f"账号 {a['openid']}"
+                self.cb_account.addItem(label, a["openid"])
+            if cur:
+                i = self.cb_account.findData(cur)
+                if i >= 0:
+                    self.cb_account.setCurrentIndex(i)
+            self.cb_account.blockSignals(False)
+
+        fac = self.db.facets(self.cb_account.currentData() or None,
+                             self.current_filters())
         for cb, key in ((self.cb_map, "maps"), (self.cb_agent, "agents"),
                         (self.cb_type, "types"), (self.cb_mode, "modes")):
+            items = fac[key]
             cb.blockSignals(True)
             cur = cb.currentData()
-            cb.clear()
-            cb.addItem({"maps": "全部地图", "agents": "全部特工",
-                        "types": "全部类型", "modes": "全部模式"}[key], "")
-            for name, n in fac[key]:
-                cb.addItem(f"{name} ({n})", name)
-            if cur:
-                i = cb.findData(cur)
-                if i >= 0:
-                    cb.setCurrentIndex(i)
+            if [cb.itemData(i) for i in range(1, cb.count())] == [n for n, _ in items]:
+                # Same values, new counts: rewrite the labels in place. A full
+                # rebuild would drop the current selection mid-interaction.
+                for i, (name, n) in enumerate(items, start=1):
+                    cb.setItemText(i, f"{name} ({n})")
+            else:
+                cb.clear()
+                cb.addItem({"maps": "全部地图", "agents": "全部特工",
+                            "types": "全部类型", "modes": "全部模式"}[key], "")
+                for name, n in items:
+                    cb.addItem(f"{name} ({n})", name)
+                if cur:
+                    i = cb.findData(cur)
+                    if i >= 0:
+                        cb.setCurrentIndex(i)
             cb.blockSignals(False)
 
     def current_filters(self) -> dict:
@@ -171,6 +191,9 @@ class MomentsPage(QFrame):
     def reload(self):
         self.offset = 0
         self._loading = False
+        # Counts first: they are derived from these very filters, so the labels
+        # and the grid can never disagree.
+        self.refresh_facets(accounts=False)
         rows, total = self.db.query_videos(self.current_filters(), PAGE, 0)
         self.grid.set_rows(rows)
         self.offset = len(rows)
@@ -189,10 +212,12 @@ class MomentsPage(QFrame):
         self._update_stats()
 
     def _update_stats(self):
-        fac = self.db.facets()
+        # "索引共" is a property of the library, so it ignores the filters —
+        # unlike the facet counts, which must honour them.
+        s = self.db.stats()
         shown = self.grid.model.rowCount()
-        miss = f" · {fac['missing']} 个源文件缺失" if fac["missing"] else ""
-        self.stats.setText(f"显示 {shown} / {self._total} 个片段 · 索引共 {fac['total']} 个{miss}")
+        miss = f" · {s['missing']} 个源文件缺失" if s["missing"] else ""
+        self.stats.setText(f"显示 {shown} / {self._total} 个片段 · 索引共 {s['videos']} 个{miss}")
 
     def rows(self):
         return self.grid.model.rows

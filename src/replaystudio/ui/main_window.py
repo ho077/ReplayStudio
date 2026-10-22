@@ -75,6 +75,7 @@ class MainWindow(QMainWindow):
 
         # ---- status bar
         status = QFrame()
+        self.status_bar = status          # fullscreen hides it
         T.style(status, "background: $SURFACE; border-top: 1px solid $BORDER;")
         sl = QHBoxLayout(status)
         sl.setContentsMargins(14, 5, 14, 5)
@@ -178,6 +179,10 @@ class MainWindow(QMainWindow):
                  "favorites": self.favorites, "recent": self.recent,
                  "player": self.player_tabs, "settings": self.settings_page}
         page = pages.get(key, self.moments)
+        # Leaving the player while the shell is hidden would strand the user
+        # with no way back (no sidebar, no title bar).
+        if page is not self.player_tabs:
+            self.exit_fullscreen_if_any()
         if key in ("favorites", "recent"):
             page.reload()
         if key == "settings":
@@ -195,6 +200,36 @@ class MainWindow(QMainWindow):
         else:
             self.player_tabs.park_all()
         self._refresh_sidebar_stats()
+
+    # ---------------------------------------------------------------- fullscreen
+    def set_fullscreen(self, on: bool):
+        """Hide the shell (title bar, sidebar, status bar) and go fullscreen.
+
+        Deliberately *not* mpv's own fullscreen property — see
+        PlayerPage.toggle_fullscreen for why that one crashes.
+        """
+        on = bool(on)
+        if on == getattr(self, "_fullscreen", False):
+            return
+        self._fullscreen = on
+        if on:
+            self._fs_hidden = [w for w in (self.titlebar, self.sidebar,
+                                           self.status_bar) if not w.isHidden()]
+            for w in self._fs_hidden:
+                w.hide()
+            self.showFullScreen()
+        else:
+            for w in getattr(self, "_fs_hidden", []):
+                w.show()
+            self._fs_hidden = []
+            self.showNormal()
+        self.player_tabs.set_fullscreen(on)
+
+    def exit_fullscreen_if_any(self) -> bool:
+        if getattr(self, "_fullscreen", False):
+            self.set_fullscreen(False)
+            return True
+        return False
 
     def _refresh_sidebar_stats(self):
         s = self.db.stats()
@@ -484,8 +519,17 @@ class MainWindow(QMainWindow):
         add("P", lambda: page() and self.step(-1))
         add("N", lambda: page() and self.step(1))
         # Escape / 返回 both mean "close this playback tab", which also stops
-        # the engine — closing the tab *is* stopping the video.
-        add("Escape", lambda: page() and self.player_tabs.close_current())
+        # the engine — closing the tab *is* stopping the video. While
+        # fullscreen, Escape means "come back down" first: closing the tab out
+        # from under a fullscreen window would leave the shell hidden.
+        def on_escape():
+            if self.exit_fullscreen_if_any():
+                return
+            pg = page()
+            if pg is not None:
+                self.player_tabs.close_current()
+
+        add("Escape", on_escape)
         add("Ctrl+W", lambda: page() and self.player_tabs.close_current())
         add("[", lambda: run(lambda pg: pg.player and pg.set_speed(max(0.25, pg.player.speed - 0.25))))
         add("]", lambda: run(lambda pg: pg.player and pg.set_speed(min(4.0, pg.player.speed + 0.25))))

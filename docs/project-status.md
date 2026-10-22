@@ -1,8 +1,27 @@
 # 项目状态
 
-更新：2026-10-22（Phase 1 + 主题系统 + Phase 2 通用播放器 + 播放生命周期重构 + 第三/四轮体验与稳定性修复 + 启动脚本与打包方案 + 第五轮切主题崩溃修复）
+更新：2026-10-22（Phase 1 + 主题系统 + Phase 2 通用播放器 + 播放生命周期重构 + 第三/四轮体验与稳定性修复 + 启动脚本与打包方案 + 第五轮切主题崩溃修复 + 第六轮全屏与分类计数）
 
 ## ✅ 已完成并通过验证
+
+### 第六轮：全屏 + 分类计数（2026-10-22）
+- **全屏之前是个空操作**：mpv 的 `fullscreen` 属性管的是它自己创建的窗口，嵌入模式
+  （`wid=`）下不存在。`probe_fullscreen.py mpv` 实测四次开关，宿主 HWND 矩形、
+  `GWL_STYLE`、窗口状态全部不动 —— 按 F 什么都没发生。现改走
+  `QMainWindow.showFullScreen()`，收起标题栏/侧边栏/状态栏、隐藏播放页信息面板与
+  标签条；关闭标签或离开播放页会自动落回窗口状态
+- **补上"双击画面"**：按钮 tooltip 一直写着「F / 双击画面」，但双击从来没绑过
+  （画面是 native window，用事件过滤器监听）
+- **Esc 语义分层**：全屏时先退出全屏，再按才关闭标签
+- **分类括号里的数字在撒谎**：`facets()` 不含搜索框 / 仅收藏 / 仅我的击杀 / 胜负等
+  条件，网格套的却是完整筛选 →「霓虹町 (154)」点下去只有 153 条。现在 WHERE 构建统一
+  走 `Database._build_where(f, skip)`，每个维度按"除自己以外的全部条件"计数，且每次
+  `reload()` 原地刷新标签（不重建下拉框，避免弄丢选中项）
+- **验证**：`probe_facet_counts.py` 修复前 7 处不符 → 0 处；`probe_facet_ui.py` 真实
+  MomentsPage 16 项 `label == grid == shown`；分页 `三杀时刻 (686)` 滚到底
+  `loaded == promised == 686`；`probe_fullscreen.py qt 8` 与 `qt-stress` 3 轮全过
+- 新增探针：`probe_fullscreen.py`、`probe_facet_counts.py`、`probe_facet_ui.py`；
+  过程记录：`docs/devlog/008-fullscreen-and-facet-counts.md`
 
 ### 第五轮：切主题崩溃 + 页面拆除（2026-10-21 ~ 22）
 - **用户报的「切几遍颜色就崩」已修复并复现验证**：关掉一个标签后再切主题，

@@ -271,30 +271,39 @@ class Database:
                 "SELECT * FROM events WHERE video_id=? ORDER BY ms", (video_id,)).fetchall()]
 
     # ------------------------------------------------------------------- queries
-    def query_videos(self, f: dict, limit: int = 200, offset: int = 0):
+    def _build_where(self, f: dict, skip: tuple[str, ...] = ()) -> tuple[list[str], list]:
+        """Shared WHERE builder for the grid *and* for the facet counts.
+
+        ``skip`` names filter keys to leave out. A facet count must be taken
+        with every *other* filter applied but never with its own: "霓虹町 (154)"
+        has to mean "154 with the filters you already picked", otherwise the
+        label promises the unfiltered total and the grid delivers less. That
+        discrepancy is exactly the "实际数量不到括号里的数量" report.
+        """
+        skip = set(skip)
         where, args = [], []
-        if f.get("source"):
+        if f.get("source") and "source" not in skip:
             where.append("v.source = ?"); args.append(f["source"])
-        if f.get("openid"):
+        if f.get("openid") and "openid" not in skip:
             where.append("v.openid = ?"); args.append(f["openid"])
-        if f.get("map"):
+        if f.get("map") and "map" not in skip:
             where.append("m.map_cn = ?"); args.append(f["map"])
-        if f.get("agent"):
+        if f.get("agent") and "agent" not in skip:
             where.append("m.agent_cn = ?"); args.append(f["agent"])
-        if f.get("vtype"):
+        if f.get("vtype") and "vtype" not in skip:
             vals = f["vtype"] if isinstance(f["vtype"], (list, tuple)) else [f["vtype"]]
             where.append("v.vtype IN (%s)" % ",".join("?" * len(vals))); args += list(vals)
-        if f.get("mode"):
+        if f.get("mode") and "mode" not in skip:
             where.append("m.mode_cn = ?"); args.append(f["mode"])
-        if f.get("result") == "win":
+        if f.get("result") == "win" and "result" not in skip:
             where.append("m.has_won = 1")
-        elif f.get("result") == "lose":
+        elif f.get("result") == "lose" and "result" not in skip:
             where.append("m.has_won = 0")
-        if f.get("favorite"):
+        if f.get("favorite") and "favorite" not in skip:
             where.append("v.video_id IN (SELECT video_id FROM favorites)")
-        if f.get("tag"):
+        if f.get("tag") and "tag" not in skip:
             where.append("v.video_id IN (SELECT video_id FROM tags WHERE tag=?)"); args.append(f["tag"])
-        if f.get("mine_only"):
+        if f.get("mine_only") and "mine_only" not in skip:
             where.append("EXISTS(SELECT 1 FROM events e WHERE e.video_id=v.video_id AND e.is_mine=1)")
         if f.get("state") == "missing":
             # Explicit request ("仅缺失"): show *only* the missing ones, which
@@ -305,12 +314,15 @@ class Database:
         elif self.missing_clause:
             where.append(self.missing_clause)
         q = (f.get("q") or "").strip()
-        if q:
+        if q and "q" not in skip:
             where.append("(v.vname LIKE ? OR v.vtype LIKE ? OR v.path LIKE ? OR m.map_cn LIKE ?"
                          " OR m.agent_cn LIKE ? OR m.match_id LIKE ?"
                          " OR v.video_id IN (SELECT video_id FROM tags WHERE tag LIKE ?))")
             args += [f"%{q}%"] * 7
+        return where, args
 
+    def query_videos(self, f: dict, limit: int = 200, offset: int = 0):
+        where, args = self._build_where(f)
         order = SORT_COLUMNS.get(f.get("sort", "最新"), SORT_COLUMNS["最新"])
         sql = f"""
             SELECT v.*, m.map_cn, m.agent_cn, m.mode_cn, m.kills, m.deaths, m.assists,
@@ -334,37 +346,48 @@ class Database:
             n = c.execute(count_sql, args[:-2]).fetchone()["n"]
         return rows, n
 
-    def facets(self, openid: str | None = None) -> dict:
-        """Sidebar facet values with counts, computed from the current index."""
-        conds, args = [], []
-        if openid:
-            conds.append("v.openid = ?")
-            args.append(openid)
-        if self.missing_clause:
-            # Counts must describe what the grid actually shows, otherwise a
-            # facet reads "霓虹町 12" and the grid lists 9.
-            conds.append(self.missing_clause)
-        pre = ("WHERE " + " AND ".join(conds)) if conds else ""
+    # Dimension -> (grouped column, filter key it must ignore)
+    FACET_DIMENSIONS = {
+        "maps": ("m.map_cn", "map"),
+        "agents": ("m.agent_cn", "agent"),
+        "types": ("v.vtype", "vtype"),
+        "modes": ("m.mode_cn", "mode"),
+    }
 
-        def group(col):
+    def facets(self, openid: str | None = None, filters: dict | None = None) -> dict:
+        """Facet values with counts, under every *other* active filter.
+
+        ``filters`` is the same dict the grid uses. Each dimension is counted
+        with that dict minus its own key, so the number in parentheses is
+        literally how many rows you get after picking it — including the
+        account, the search box, 仅收藏 and 仅我的击杀/死亡.
+        """
+        f = dict(filters or {})
+        if openid:
+            f["openid"] = openid
+
+        def group(col: str, own_key: str):
+            where, args = self._build_where(f, skip=(own_key,))
+            pre = ("WHERE " + " AND ".join(where)) if where else ""
             sql = f"""SELECT {col} AS k, COUNT(*) AS n FROM videos v
                      LEFT JOIN matches m ON m.match_id = v.match_id
                      {pre} GROUP BY {col} ORDER BY n DESC"""
             with self.conn() as c:
                 return [(r["k"], r["n"]) for r in c.execute(sql, args).fetchall() if r["k"]]
 
+        where, args = self._build_where(f)
+        pre = ("WHERE " + " AND ".join(where)) if where else ""
         with self.conn() as c:
             total = c.execute(
-                f"SELECT COUNT(*) n FROM videos v {pre}", args).fetchone()["n"]
+                f"""SELECT COUNT(*) n FROM videos v
+                    LEFT JOIN matches m ON m.match_id = v.match_id {pre}""",
+                args).fetchone()["n"]
+            # Purged files are a property of the index, not of the filter.
             missing = c.execute("SELECT COUNT(*) n FROM videos WHERE file_state=2").fetchone()["n"]
-        return {
-            "maps": group("m.map_cn"),
-            "agents": group("m.agent_cn"),
-            "types": group("v.vtype"),
-            "modes": group("m.mode_cn"),
-            "total": total,
-            "missing": missing,
-        }
+        out = {key: group(col, own) for key, (col, own) in self.FACET_DIMENSIONS.items()}
+        out["total"] = total
+        out["missing"] = missing
+        return out
 
     def get_video(self, video_id: str):
         with self.conn() as c:

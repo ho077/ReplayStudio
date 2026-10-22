@@ -185,6 +185,8 @@ class PlayerTabs(QFrame):
         self.bar.blockSignals(False)
         self.body.setCurrentWidget(page)
         self._sync_visibility()
+        if getattr(self, "_fullscreen", False):
+            page.set_fullscreen(True)
         self._park_others(page)
 
         page.load(row, start)
@@ -383,10 +385,22 @@ class PlayerTabs(QFrame):
         if getattr(page, "parked_playing", False):
             p.set_paused(False)
 
+    # ------------------------------------------------------------- fullscreen
+    def set_fullscreen(self, on: bool):
+        """Hide the tab strip and hand the state to every page.
+
+        A tab opened *while* fullscreen has to come up already fullscreen, so
+        the flag lives here rather than on the page that asked for it.
+        """
+        self._fullscreen = bool(on)
+        self.bar.setVisible(not self._fullscreen and self.count() > 0)
+        for page in self.pages():
+            page.set_fullscreen(self._fullscreen)
+
     # ------------------------------------------------------------ appearance
     def _sync_visibility(self):
         has = self.count() > 0
-        self.bar.setVisible(has)
+        self.bar.setVisible(has and not getattr(self, "_fullscreen", False))
         self.body.setVisible(has)
         self.placeholder.setVisible(not has)
 

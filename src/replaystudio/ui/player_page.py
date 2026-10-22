@@ -15,7 +15,7 @@ from __future__ import annotations
 import os
 import sys
 
-from PySide6.QtCore import QObject, QPoint, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, QPoint, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QPainter
 from PySide6.QtWidgets import (QFileDialog, QFrame, QHBoxLayout, QLabel,
                                QListWidget, QListWidgetItem, QMenu,
@@ -206,6 +206,10 @@ class PlayerPage(QFrame):
         self.video_host.setAttribute(Qt.WA_NativeWindow, True)
         self.video_host.setAttribute(Qt.WA_DontCreateNativeAncestors, True)
         stage_lay.addWidget(self.video_host)
+        # "F / 双击画面" is what the button promises; the surface is a native
+        # window and swallows mouse events, so it needs an event filter rather
+        # than a subclass.
+        self.video_host.installEventFilter(self)
         # floating overlay (OSD toast + error panel), positioned in resizeEvent
         self.overlay = QLabel(self.stage)
         self.overlay.hide()
@@ -222,6 +226,8 @@ class PlayerPage(QFrame):
         side = QFrame()
         side.setObjectName("panel")
         side.setFixedWidth(276)
+        # Kept as an attribute: fullscreen has to be able to hide it.
+        self.side_panel = side
         sl = QVBoxLayout(side)
         sl.setContentsMargins(12, 12, 12, 12)
         sl.setSpacing(8)
@@ -442,6 +448,12 @@ class PlayerPage(QFrame):
         except Exception:
             # Never let a cosmetic fix break playback.
             pass
+
+    def eventFilter(self, obj, event):  # noqa: N802
+        if obj is self.video_host and event.type() == QEvent.Type.MouseButtonDblClick:
+            self.toggle_fullscreen()
+            return True
+        return super().eventFilter(obj, event)
 
     def showEvent(self, e):  # noqa: N802
         super().showEvent(e)
@@ -758,11 +770,39 @@ class PlayerPage(QFrame):
             return 5
 
     def toggle_fullscreen(self):
-        if not self.player:
+        """Fullscreen the *window*, not mpv.
+
+        mpv's own ``fullscreen`` property drives the window mpv would have
+        created for itself. In embedded mode (``wid=``) there is no such
+        window — ours is — so setting it makes libmpv resize and restyle a
+        HWND that Qt also believes it owns, and the two fight over it. That is
+        the "全屏后闪退" report. Qt's ``showFullScreen()`` needs no help from
+        mpv and never touches the HWND behind Qt's back; the surface follows
+        because the layout resizes the host widget like any other.
+        """
+        win = self.window()
+        if win is None:
             return
         self._fs = not self._fs
-        self.player.set_fullscreen(self._fs)
-        self.show_osd("全屏" if self._fs else "退出全屏")
+        host = getattr(win, "set_fullscreen", None)
+        if host is not None:
+            host(self._fs)
+        elif self._fs:
+            win.showFullScreen()
+        else:
+            win.showNormal()
+        self.show_osd("全屏（Esc 退出）" if self._fs else "退出全屏")
+
+    def set_fullscreen(self, on: bool):
+        """Apply/undo the fullscreen layout. Called by the window and by
+        PlayerTabs when the user switches tab while still fullscreen."""
+        was, self._fs = self._fs, bool(on)
+        if was == self._fs:
+            return
+        self.side_panel.setVisible(not on)
+        # The stage just changed size; the native surface does not follow the
+        # layout by itself (see _sync_native_surface).
+        QTimer.singleShot(80, self._sync_native_surface)
 
     def take_screenshot(self):
         if not self.player:
@@ -936,6 +976,19 @@ class PlayerPage(QFrame):
         """
         self._timer.stop()
         self._osd_timer.stop()
+        try:
+            self.video_host.removeEventFilter(self)
+        except RuntimeError:
+            pass
+        # A fullscreen window with no video in it is a black screen with no
+        # visible way out (the shell is hidden), so come back down first.
+        if self._fs:
+            win = self.window()
+            try:
+                if win is not None and hasattr(win, "set_fullscreen"):
+                    win.set_fullscreen(False)
+            except RuntimeError:
+                pass                    # window already gone during shutdown
         # Drop our ~11 entries from the theme registry *before* the C++ side
         # goes away. The registry held them strongly, which kept this page (and
         # the engine it owns) reachable long after the tab was closed.
