@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import threading
 import time
+import weakref
 from contextlib import contextmanager
 
 SCHEMA = """
@@ -146,6 +148,18 @@ def user_data_dir() -> str:
     return d
 
 
+def _ro_uri(path: str) -> str:
+    """file: URI in read-only mode.
+
+    Measured on this machine (tools/probe_db_perf.py): opening the same index
+    read-write costs ~60 ms and read-only ~3 ms, for `SELECT 1`. Almost every
+    call in a browsing session is a read, and that 60 ms was being paid three
+    or four times per page refresh.
+    """
+    p = os.path.abspath(path).replace("\\", "/")
+    return "file:///" + p.replace("?", "%3f").replace("#", "%23") + "?mode=ro"
+
+
 class Database:
     def __init__(self, path: str | None = None, show_missing: bool = False):
         self.path = path or os.path.join(user_data_dir(), "index.db")
@@ -155,6 +169,13 @@ class Database:
         # file comes back — but they no longer clutter the grids.
         self.show_missing = show_missing
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        # One long-lived read connection, see read_conn(). Every query we issue
+        # is sub-millisecond (measured: 0.5 ms for the main list) while opening
+        # a connection costs 60 ms read-write and 3 ms read-only — so the last
+        # honest win here was not opening one per call at all.
+        self._ro: sqlite3.Connection | None = None
+        self._ro_finalizer = None
+        self._ro_lock = threading.RLock()
         self._init_schema()
 
     @property
@@ -171,11 +192,100 @@ class Database:
         # short enough that a stall reads as an error instead of a freeze.
         c = sqlite3.connect(self.path, timeout=3)
         c.row_factory = sqlite3.Row
+        self._tune(c)
         try:
             yield c
             c.commit()
         finally:
             c.close()
+
+    @staticmethod
+    def _tune(c: sqlite3.Connection):
+        """Cheap, per-connection pragmas. Read connections are short-lived, so
+        these are set every time; each one is a memory assignment, not I/O."""
+        try:
+            c.execute("PRAGMA cache_size=-8000")      # ~8 MB page cache
+            c.execute("PRAGMA temp_store=MEMORY")
+            c.execute("PRAGMA mmap_size=268435456")   # 256 MB of mapped pages
+        except sqlite3.OperationalError:
+            pass                                       # read-only/KIOSK cases
+
+    @contextmanager
+    def read_conn(self):
+        """Read connection used by every query.
+
+        Why it is cached: the queries themselves are 0.2–0.6 ms, but opening a
+        connection is 60 ms read-write and 3 ms read-only (measured on this
+        machine; see _ro_uri). Browsing issues ~5 queries per page, so "one
+        connection per call" still paid 15 ms of pure file-opening per refresh.
+
+        Thread-safety: the scanner writes through its own connections, and this
+        one may be touched from worker threads too, hence the reentrant lock and
+        check_same_thread=False. SQLite serialises properly, we just have to
+        make sure two threads never share a cursor.
+        """
+        with self._ro_lock:
+            c = self._open_or_reuse_ro()
+            try:
+                yield c
+            except sqlite3.Error:
+                # A cached handle can go bad (file replaced by a rescan, -shm
+                # rebuilt, database swapped). Drop it and let the next caller
+                # start clean; this call's failure is already unravelling.
+                self._close_ro()
+                raise
+
+    def _open_or_reuse_ro(self) -> sqlite3.Connection:
+        c = self._ro
+        if c is not None:
+            try:
+                c.execute("SELECT 1").fetchone()    # ~0 ms; proves it is alive
+                return c
+            except sqlite3.Error:
+                self._close_ro()
+        try:
+            c = sqlite3.connect(_ro_uri(self.path), uri=True, timeout=3,
+                                check_same_thread=False)
+            c.row_factory = sqlite3.Row
+            self._tune(c)
+        except sqlite3.OperationalError:
+            # No -shm yet (or read-only media): a WAL database needs one before
+            # it can be read read-only. Fall back to a read-write handle.
+            c = sqlite3.connect(self.path, timeout=3, check_same_thread=False)
+            c.row_factory = sqlite3.Row
+            self._tune(c)
+        self._ro = c
+        # A cached handle keeps the file open, which on Windows means nobody
+        # can delete it. Release it when this Database is collected, so
+        # temp-directory tests (and "删除索引重建") are not blocked by us.
+        self._ro_finalizer = weakref.finalize(self, self._close_conn_quietly, c)
+        return c
+
+    @staticmethod
+    def _close_conn_quietly(conn: sqlite3.Connection):
+        """Finalizer target: a plain function holding only the connection, so
+        it never resurrects the Database object."""
+        try:
+            conn.close()
+        except sqlite3.Error:
+            pass
+
+    def _close_ro(self):
+        if self._ro is not None:
+            c, self._ro = self._ro, None
+            try:
+                c.close()
+            except sqlite3.Error:
+                pass
+            if self._ro_finalizer is not None:
+                self._ro_finalizer.detach()
+                self._ro_finalizer = None
+
+    def close(self):
+        """Drop the cached read connection. Not required — the process quitting
+        closes the handle anyway — but it lets a caller delete the file."""
+        with self._ro_lock:
+            self._close_ro()
 
     @contextmanager
     def _tx(self, existing=None):
@@ -202,12 +312,12 @@ class Database:
                       (openid, nick, tag, db_path, db_mtime, db_size, int(time.time())))
 
     def get_account_meta(self, openid: str):
-        with self.conn() as c:
+        with self.read_conn() as c:
             r = c.execute("SELECT db_mtime, db_size FROM accounts WHERE openid=?", (openid,)).fetchone()
             return (r["db_mtime"], r["db_size"]) if r else (0.0, 0)
 
     def list_accounts(self):
-        with self.conn() as c:
+        with self.read_conn() as c:
             return [dict(r) for r in c.execute(
                 "SELECT * FROM accounts ORDER BY nick, openid").fetchall()]
 
@@ -271,7 +381,7 @@ class Database:
                             e.weapon, e.weapon_class, e.round_id, int(e.is_mine)) for e in events])
 
     def get_events(self, video_id: str):
-        with self.conn() as c:
+        with self.read_conn() as c:
             return [dict(r) for r in c.execute(
                 "SELECT * FROM events WHERE video_id=? ORDER BY ms", (video_id,)).fetchall()]
 
@@ -342,7 +452,7 @@ class Database:
             ORDER BY {order}
             LIMIT ? OFFSET ?"""
         args += [limit, offset]
-        with self.conn() as c:
+        with self.read_conn() as c:
             rows = [dict(r) for r in c.execute(sql, args).fetchall()]
             count_sql = """
                 SELECT COUNT(*) AS n FROM videos v
@@ -371,31 +481,32 @@ class Database:
         if openid:
             f["openid"] = openid
 
-        def group(col: str, own_key: str):
-            where, args = self._build_where(f, skip=(own_key,))
-            pre = ("WHERE " + " AND ".join(where)) if where else ""
-            sql = f"""SELECT {col} AS k, COUNT(*) AS n FROM videos v
-                     LEFT JOIN matches m ON m.match_id = v.match_id
-                     {pre} GROUP BY {col} ORDER BY n DESC"""
-            with self.conn() as c:
-                return [(r["k"], r["n"]) for r in c.execute(sql, args).fetchall() if r["k"]]
+        with self.read_conn() as c:
+            def group(col: str, own_key: str):
+                where, args = self._build_where(f, skip=(own_key,))
+                pre = ("WHERE " + " AND ".join(where)) if where else ""
+                sql = f"""SELECT {col} AS k, COUNT(*) AS n FROM videos v
+                         LEFT JOIN matches m ON m.match_id = v.match_id
+                         {pre} GROUP BY {col} ORDER BY n DESC"""
+                return [(r["k"], r["n"])
+                        for r in c.execute(sql, args).fetchall() if r["k"]]
 
-        where, args = self._build_where(f)
-        pre = ("WHERE " + " AND ".join(where)) if where else ""
-        with self.conn() as c:
-            total = c.execute(
+            out = {key: group(col, own)
+                   for key, (col, own) in self.FACET_DIMENSIONS.items()}
+
+            where, args = self._build_where(f)
+            pre = ("WHERE " + " AND ".join(where)) if where else ""
+            out["total"] = c.execute(
                 f"""SELECT COUNT(*) n FROM videos v
                     LEFT JOIN matches m ON m.match_id = v.match_id {pre}""",
                 args).fetchone()["n"]
             # Purged files are a property of the index, not of the filter.
-            missing = c.execute("SELECT COUNT(*) n FROM videos WHERE file_state=2").fetchone()["n"]
-        out = {key: group(col, own) for key, (col, own) in self.FACET_DIMENSIONS.items()}
-        out["total"] = total
-        out["missing"] = missing
+            out["missing"] = c.execute(
+                "SELECT COUNT(*) n FROM videos WHERE file_state=2").fetchone()["n"]
         return out
 
     def get_video(self, video_id: str):
-        with self.conn() as c:
+        with self.read_conn() as c:
             r = c.execute("""SELECT v.*, m.map_cn, m.agent_cn, m.mode_cn, m.kills, m.deaths,
                              m.assists, m.has_won, m.start_ms, m.end_ms, a.nick, a.tag
                              FROM videos v
@@ -406,7 +517,7 @@ class Database:
 
     def get_video_by_path(self, path: str):
         """Look up an indexed row by absolute path (used for drag&drop / argv)."""
-        with self.conn() as c:
+        with self.read_conn() as c:
             r = c.execute("""SELECT v.*, m.map_cn, m.agent_cn, m.mode_cn, m.kills, m.deaths,
                              m.assists, m.has_won, m.start_ms, m.end_ms, a.nick, a.tag
                              FROM videos v
@@ -423,12 +534,12 @@ class Database:
                           [(video_id, t) for t in tags if t.strip()])
 
     def get_tags(self, video_id: str):
-        with self.conn() as c:
+        with self.read_conn() as c:
             return [r["tag"] for r in c.execute(
                 "SELECT tag FROM tags WHERE video_id=? ORDER BY tag", (video_id,)).fetchall()]
 
     def all_tags(self):
-        with self.conn() as c:
+        with self.read_conn() as c:
             return [(r["tag"], r["n"]) for r in c.execute(
                 "SELECT tag, COUNT(*) n FROM tags GROUP BY tag ORDER BY n DESC").fetchall()]
 
@@ -450,7 +561,7 @@ class Database:
 
     def recent(self, limit: int = 60):
         extra = f"WHERE {self.missing_clause}" if self.missing_clause else ""
-        with self.conn() as c:
+        with self.read_conn() as c:
             return [dict(r) for r in c.execute(f"""
                 SELECT v.*, m.map_cn, m.agent_cn, h.ts, h.pos_s,
                        MAX(h.ts) AS last_ts
@@ -462,7 +573,7 @@ class Database:
                 ORDER BY last_ts DESC LIMIT ?""", (limit,)).fetchall()]
 
     def last_position(self, video_id: str):
-        with self.conn() as c:
+        with self.read_conn() as c:
             r = c.execute("""SELECT pos_s FROM play_history WHERE video_id=?
                              ORDER BY ts DESC LIMIT 1""", (video_id,)).fetchone()
             return r["pos_s"] if r else 0.0
@@ -478,7 +589,7 @@ class Database:
             c.execute("DELETE FROM roots WHERE path=?", (path,))
 
     def list_roots(self, kind: str | None = None):
-        with self.conn() as c:
+        with self.read_conn() as c:
             if kind:
                 rows = c.execute("SELECT * FROM roots WHERE kind=? ORDER BY path", (kind,)).fetchall()
             else:
@@ -487,7 +598,7 @@ class Database:
 
     # ----------------------------------------------------------------- settings
     def get_setting(self, key: str, default: str = ""):
-        with self.conn() as c:
+        with self.read_conn() as c:
             r = c.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
             return r["value"] if r else default
 
@@ -501,19 +612,31 @@ class Database:
         """Re-stat indexed files. Cheap (no hashing); marks moved/deleted files."""
         changed = 0
         with self.conn() as c:
-            rows = c.execute("SELECT video_id, path FROM videos").fetchall()
+            if paths:
+                marks = ",".join("?" * len(paths))
+                rows = c.execute(
+                    f"SELECT video_id, path FROM videos WHERE path IN ({marks})",
+                    list(paths)).fetchall()
+            else:
+                rows = c.execute("SELECT video_id, path FROM videos").fetchall()
+            # Current states in one query, not one per row: this runs after
+            # every scan and is the definition of a hot loop (1471 rows).
+            before = {r["video_id"]: r["file_state"]
+                      for r in c.execute("SELECT video_id, file_state FROM videos")}
+            updates = []
             for r in rows:
                 state, mtime, size = self._probe_state(r["path"])
-                cur = c.execute("SELECT file_state FROM videos WHERE video_id=?",
-                                (r["video_id"],)).fetchone()
-                if cur and cur["file_state"] != state:
-                    c.execute("""UPDATE videos SET file_state=?, file_mtime=?, file_size=?
-                                 WHERE video_id=?""", (state, mtime, size, r["video_id"]))
-                    changed += 1
+                if before.get(r["video_id"]) != state:
+                    updates.append((state, mtime, size, r["video_id"]))
+            if updates:
+                c.executemany(
+                    "UPDATE videos SET file_state=?, file_mtime=?, file_size=? "
+                    "WHERE video_id=?", updates)
+                changed = len(updates)
         return changed
 
     def stats(self) -> dict:
-        with self.conn() as c:
+        with self.read_conn() as c:
             v = c.execute("SELECT COUNT(*) n, COALESCE(SUM(size_bytes),0) s FROM videos").fetchone()
             present = c.execute(
                 "SELECT COUNT(*) n, COALESCE(SUM(size_bytes),0) s FROM videos "

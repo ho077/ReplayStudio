@@ -16,6 +16,9 @@ from PySide6.QtCore import QThread, Signal
 VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv", ".ts",
               ".m2ts", ".wmv", ".mpg", ".mpeg", ".m4v", ".rmvb"}
 
+# Rows written between commits during one directory walk; see LocalScanWorker.
+BATCH = 500
+
 
 @dataclass
 class LocalVideo:
@@ -84,7 +87,15 @@ class LocalScanWorker(QThread):
                         )
                         self.db.upsert_video(v, file_state=1, _conn=c)
                         count += 1
-                        if count % 200 == 0:
+                        if count % BATCH == 0:
+                            # Commit periodically. One transaction for the
+                            # whole walk means SQLite cannot checkpoint the WAL
+                            # until it ends, so a long scan over a big library
+                            # grows the -wal file for its entire duration and
+                            # nothing is durable until the last file is seen.
+                            c.commit()
+                            self.progress.emit(count, os.path.basename(dirpath))
+                        elif count % 50 == 0:
                             self.progress.emit(count, os.path.basename(dirpath))
         self.finished_ok.emit(count)
 
