@@ -58,8 +58,7 @@ def produce_thumbnail(video_id: str, path: str, poster: str = "",
     # 1. ACLOS's own cover — preferred, it is what the game actually rendered.
     if poster and os.path.isfile(poster):
         try:
-            with open(poster, "rb") as src, open(out, "wb") as dst:
-                dst.write(src.read())
+            _atomic_copy(poster, out)
             if os.path.getsize(out) > 0:
                 return out
         except OSError:
@@ -81,6 +80,21 @@ def produce_thumbnail(video_id: str, path: str, poster: str = "",
     except (OSError, subprocess.SubprocessError):
         return ""
     return out if os.path.isfile(out) and os.path.getsize(out) > 0 else ""
+
+
+def _atomic_copy(src_path: str, dst_path: str):
+    """Copy via a .part file + rename.
+
+    Two instances (or two tasks) writing `dst_path` directly used to leave a
+    half-written JPEG behind. That file passes the `size > 0` cache check
+    forever after, so the video's thumbnail never decodes again — the card
+    stays on "载入封面…" for the rest of the app's life. os.replace is atomic
+    on Windows, so a reader sees either nothing or the whole file.
+    """
+    tmp = dst_path + f".part{os.getpid()}"
+    with open(src_path, "rb") as src, open(tmp, "wb") as dst:
+        dst.write(src.read())
+    os.replace(tmp, dst_path)
 
 
 class _Signals(QObject):
@@ -106,6 +120,14 @@ class _ThumbTask(QRunnable):
                 return
             img = QImage(p)
             if img.isNull():
+                # A non-decodable file in the cache (usually the remains of two
+                # writers racing before the atomic-rename fix) poisons this
+                # video forever: every retry reads the same junk. Drop it so
+                # the next attempt regenerates from scratch.
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
                 self.signals.failed.emit(self.video_id)
                 return
             img = img.scaled(self.width, self.height,
@@ -128,6 +150,7 @@ class ThumbnailService(QObject):
         self.pool.setMaxThreadCount(max_workers)
         self._inflight: set[str] = set()
         self._ready: set[str] = set()
+        self._failed: set[str] = set()
 
     def is_cached(self, video_id: str) -> bool:
         return video_id in self._ready
@@ -135,6 +158,13 @@ class ThumbnailService(QObject):
     def request(self, video_id: str, path: str, poster: str = "",
                 width: int = 360, height: int = 203):
         if not video_id or video_id in self._inflight or video_id in self._ready:
+            return
+        if video_id in self._failed:
+            # Every paint calls data(DecorationRole) → request(); without this
+            # the 250 cards of a filter with no thumbnails would re-queue their
+            # ffmpeg jobs in an endless storm, pegging the pool and the disk
+            # for as long as the window is open. One try per session; a rescan
+            # (clear_ready) gives them a fresh chance.
             return
         self._inflight.add(video_id)
         task = _ThumbTask(video_id, path, poster, width, height)
@@ -149,7 +179,9 @@ class ThumbnailService(QObject):
 
     def _on_failed(self, video_id: str):
         self._inflight.discard(video_id)
+        self._failed.add(video_id)
         self.failed.emit(video_id)
 
     def clear_ready(self):
         self._ready.clear()
+        self._failed.clear()

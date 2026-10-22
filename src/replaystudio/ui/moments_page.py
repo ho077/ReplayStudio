@@ -47,6 +47,14 @@ class MomentsPage(QFrame):
         self.cb_type = QComboBox(); self.cb_type.setMinimumWidth(104)
         self.cb_mode = QComboBox(); self.cb_mode.setMinimumWidth(100)
         self.cb_result = QComboBox(); self.cb_result.setMinimumWidth(80)
+        # Labels like "四杀时刻 (686)" get cut to "四杀时刻 (" on a fixed
+        # 104 px box; AdjustToMinimumContentsLengthWithIcon widens the popup
+        # *and* the box to fit the longest current label.
+        for cb in (self.cb_account, self.cb_map, self.cb_agent, self.cb_type,
+                   self.cb_mode, self.cb_result):
+            cb.setSizeAdjustPolicy(
+                QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+            cb.setMinimumContentsLength(16)
         for cb, label in ((self.cb_account, "全部账号"), (self.cb_map, "全部地图"),
                           (self.cb_agent, "全部特工"), (self.cb_type, "全部类型"),
                           (self.cb_mode, "全部模式"), (self.cb_result, "全部结果")):

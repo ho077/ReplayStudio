@@ -9,6 +9,7 @@ from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication
 
 from .core import diagnostics
+from .core.single_instance import SingleInstance
 from .media.player import ensure_mpv_dll
 from .ui.main_window import MainWindow
 
@@ -39,14 +40,29 @@ def main(argv: list[str] | None = None) -> int:
     app.setFont(font)
     diagnostics.install_qt(app)
 
+    # Command-line arguments: `run.py <file>` or Windows "open with" (%1).
+    files = [os.path.abspath(a) for a in list(argv or sys.argv)[1:]
+             if a and not a.startswith("-") and os.path.isfile(a)]
+
+    # One instance only. Two copies freeze each other on the SQLite write lock
+    # and race the thumbnail cache; the user experienced exactly that as
+    # "卡住了" after double-clicking files a few times.
+    inst = SingleInstance(app)
+    if not inst.acquire(None):
+        # Hand the files to the running instance (it picks the request up on
+        # its next 400 ms poll and raises its window), then leave quietly. No
+        # dialog here: the raised window is the feedback, and "open with"
+        # launches must not block on a modal box. A stale lock from a crashed
+        # holder does not reach this path: tryLock recovers those on its own.
+        inst.drop_request(files)
+        return 0
+
     win = MainWindow()
     win.show()
 
-    # Command-line arguments: `run.py <file>` or Windows "open with" (%1).
+    inst._on_open = win.open_paths
+
     # Deferred one tick so the window exists (and mpv has a window handle).
-    argv = list(argv or sys.argv)[1:]
-    files = [os.path.abspath(a) for a in argv
-             if a and not a.startswith("-") and os.path.isfile(a)]
     if files:
         QTimer.singleShot(350, lambda: win.open_paths(files))
 

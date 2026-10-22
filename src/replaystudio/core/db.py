@@ -164,7 +164,12 @@ class Database:
 
     @contextmanager
     def conn(self):
-        c = sqlite3.connect(self.path, timeout=30)
+        # timeout here is the busy-handler wait, and every UI query opens its
+        # own connection. A second instance holding the write lock used to make
+        # the UI thread sit in here for 30 full seconds with zero repaints —
+        # the "卡住了" report. 3 s is longer than any of our writes takes and
+        # short enough that a stall reads as an error instead of a freeze.
+        c = sqlite3.connect(self.path, timeout=3)
         c.row_factory = sqlite3.Row
         try:
             yield c

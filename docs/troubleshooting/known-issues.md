@@ -2,6 +2,13 @@
 
 ## 环境类
 
+### 软件卡住 / 界面全部「载入封面…」（2026-10-23 已修复）
+历史原因：允许多实例并存，互相争数据库写锁（原 30s 忙等）与缩略图缓存
+（并发写坏 JPEG 后永久毒化）。现已：单实例锁（第二实例把文件转交给正在
+运行的窗口后退出）、缓存原子写 + 坏文件自动清理、失败缩略图本会话不重试、
+DB 忙等降到 3s。详见 devlog 009。若再次遇到，先查任务管理器是否有多个
+python.exe 残留。
+
 ### `RuntimeError: 未找到 libmpv-2.dll`
 确认 `vendor/mpv/libmpv-2.dll` 存在（115 MB）。python-mpv 通过 `%PATH%` 找它，
 `media/player.py::ensure_mpv_dll` 已自动处理；若手动跑脚本，先 `import replaystudio.media.player`。
