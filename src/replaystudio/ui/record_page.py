@@ -228,7 +228,18 @@ class RecordPage(QFrame):
         i = self.cb_container.findData(fmt)
         if i >= 0:
             self.cb_container.setCurrentIndex(i)
-        d = s.get("record_dir", "") or obs_paths.default_record_dir()
+        d = s.get("record_dir", "")
+        # Migrate the old default: it pointed into %LOCALAPPDATA%, i.e. C:, and
+        # video does not belong on the system drive. Only a value the user never
+        # chose is replaced — anything they picked themselves is left alone.
+        if obs_paths.is_legacy_default(d):
+            d = obs_paths.default_record_dir(self.db)
+            if self.settings is not None:
+                self.settings["record_dir"] = d
+                try:
+                    self.settings.save()
+                except Exception:  # noqa: BLE001
+                    pass
         self.ed_dir.setText(d)
         self._refresh_windows()
         saved = s.get("record_window", "") or ""
@@ -268,7 +279,7 @@ class RecordPage(QFrame):
         sp.desktop_audio = self.ck_desktop.isChecked()
         sp.mic = self.ck_mic.isChecked()
         sp.container = self.cb_container.currentData() or "hybrid_mp4"
-        sp.output_dir = self.ed_dir.text().strip() or obs_paths.default_record_dir()
+        sp.output_dir = self.ed_dir.text().strip() or obs_paths.default_record_dir(self.db)
 
     def _refresh_windows(self):
         self.cb_window.clear()
@@ -288,14 +299,14 @@ class RecordPage(QFrame):
 
     # ------------------------------------------------------------------ 目录
     def _pick_dir(self):
-        start = self.ed_dir.text().strip() or obs_paths.default_record_dir()
+        start = self.ed_dir.text().strip() or obs_paths.default_record_dir(self.db)
         d = QFileDialog.getExistingDirectory(self, "选择录制保存目录", start)
         if d:
             self.ed_dir.setText(d)
             self._save_settings()
 
     def _open_dir(self):
-        d = self.ed_dir.text().strip() or obs_paths.default_record_dir()
+        d = self.ed_dir.text().strip() or obs_paths.default_record_dir(self.db)
         try:
             os.makedirs(d, exist_ok=True)
         except OSError:
@@ -350,7 +361,7 @@ class RecordPage(QFrame):
         self._count_files()
 
     def _count_files(self):
-        d = self.ed_dir.text().strip() or obs_paths.default_record_dir()
+        d = self.ed_dir.text().strip() or obs_paths.default_record_dir(self.db)
         n = 0
         try:
             with os.scandir(d) as it:

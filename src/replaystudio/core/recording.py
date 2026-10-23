@@ -186,7 +186,7 @@ class Recorder(QObject):
     def __init__(self, db=None, parent=None):
         super().__init__(parent)
         self.db = db
-        self.spec = CaptureSpec(output_dir=obs_paths.default_record_dir())
+        self.spec = CaptureSpec(output_dir=obs_paths.default_record_dir(db))
         self.state = IDLE
         self.client: ObsClient | None = None
 
@@ -260,7 +260,12 @@ class Recorder(QObject):
                           f"/ ws {data.get('obsWebSocketVersion', '')}".strip())
         self.client.call("GetVersion", cb=got)
 
-        d = self.spec.output_dir or obs_paths.default_record_dir()
+        d = self.spec.output_dir or obs_paths.default_record_dir(self.db)
+        if obs_paths.is_legacy_default(d):
+            # Never send the old C: default to OBS, even if a stale setting
+            # still carries it.
+            d = obs_paths.default_record_dir(self.db)
+            self.spec.output_dir = d
         try:
             os.makedirs(d, exist_ok=True)
         except OSError:

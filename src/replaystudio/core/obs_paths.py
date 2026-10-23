@@ -107,9 +107,83 @@ def ensure_ws_config(home: str, port: int = DEFAULT_PORT) -> dict:
     return cfg
 
 
-def default_record_dir() -> str:
+# The game's own highlight folder, e.g. `D:\Document\Video\Valorant`. Recordings
+# belong next to it: the user asked for one place for both, and C: is exactly
+# the wrong answer for video (it is also the drive that keeps running out).
+_GAME_DIR_HINT = "Valorant"
+_RECORD_SUBDIR = "ReplayStudio"
+
+
+def _cut_at(path: str, hint: str) -> str:
+    """`D:\\Doc\\Vid\\Valorant\\wonderfulVideos12\\x.mp4` -> `...\\Valorant`."""
+    parts = (path or "").replace("/", "\\").split("\\")
+    for i, seg in enumerate(parts):
+        if hint.lower() in seg.lower():
+            return "\\".join(parts[:i + 1])
+    return ""
+
+
+def game_video_root(db=None) -> str:
+    """Directory the game stores its own highlights in, or '' if we cannot tell.
+
+    Preferred source is the index we already built: 1472 of the user's clips
+    live under one Valorant folder, so asking beats guessing drive letters.
+    `db` is duck-typed (anything with `.read_conn()`), which keeps this module
+    free of a dependency on core.db.
+    """
+    from collections import Counter
+
+    cands: list[str] = []
+    if db is not None and hasattr(db, "read_conn"):
+        try:
+            with db.read_conn() as c:
+                rows = c.execute(
+                    "SELECT path FROM videos WHERE path LIKE ? LIMIT 3000",
+                    (f"%{_GAME_DIR_HINT}%",)).fetchall()
+            for (path,) in rows:
+                cut = _cut_at(path, _GAME_DIR_HINT)
+                if cut:
+                    cands.append(cut)
+        except Exception:
+            pass
+    for drive in "DEFG":
+        for mid in ("Document", "Documents"):
+            cands.append(f"{drive}:\\{mid}\\Video\\{_GAME_DIR_HINT}")
+    for path, _n in Counter(cands).most_common():
+        if path and os.path.isdir(path):
+            return path
+    return ""
+
+
+def default_record_dir(db=None) -> str:
+    """Where recordings go when the user has not chosen one.
+
+    Deliberately not on C:. Order: next to the game's own highlights, then any
+    other fixed drive, and only if there is nothing else at all do we fall back
+    to the local app-data folder (which is what put video on C: before).
+    """
+    root = game_video_root(db)
+    if root:
+        return os.path.join(root, _RECORD_SUBDIR)
+    for drive in "DEFG":
+        if os.path.isdir(f"{drive}:\\"):
+            return os.path.join(f"{drive}:\\ReplayStudio", "recordings")
     base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
     return os.path.join(base, "ReplayStudio", "recordings")
+
+
+def legacy_default_record_dir() -> str:
+    """The old default, which lived on C:. Recognised so it can be migrated."""
+    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    return os.path.join(base, "ReplayStudio", "recordings")
+
+
+def is_legacy_default(path: str) -> bool:
+    """True when `path` is empty or still the old C:-based default."""
+    if not (path or "").strip():
+        return True
+    return os.path.normcase(os.path.abspath(path)) == os.path.normcase(
+        os.path.abspath(legacy_default_record_dir()))
 
 
 def ensure_unattended_config(home: str) -> bool:
