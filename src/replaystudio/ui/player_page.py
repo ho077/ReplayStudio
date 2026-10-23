@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (QFileDialog, QFrame, QHBoxLayout, QLabel,
                                QSlider, QStackedWidget, QVBoxLayout, QWidget)
 
 from ..core import diagnostics
+from ..core.db import user_data_dir
 from ..media.player import MpvPlayer
 from . import qt_teardown as qt
 from . import theme as T
@@ -807,7 +808,7 @@ class PlayerPage(QFrame):
     def take_screenshot(self):
         if not self.player:
             return
-        base = os.path.join(os.path.expanduser("~"), "Pictures", "ReplayStudio")
+        base = os.path.join(user_data_dir(), "screenshots")
         os.makedirs(base, exist_ok=True)
         name = os.path.splitext(os.path.basename(self.player.path or "frame"))[0]
         out = os.path.join(base, f"{name}_{int(self.player.position*1000)}.png")

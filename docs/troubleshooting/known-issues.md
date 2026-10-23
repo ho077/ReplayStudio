@@ -35,7 +35,8 @@ python.exe 残留。
 详见 `docs/devlog/004-playback-lifecycle-and-crash-logging.md`。
 
 ### 程序静默退出 / 崩溃
-现在启动即写日志，位置在 `%LOCALAPPDATA%\ReplayStudio\logs\`：
+现在启动即写日志，位置在应用数据目录下（默认 `<repo>/data/logs\`，设置页
+「打开日志目录」按钮直达；设了 `REPLAYSTUDIO_DATA_DIR` 就跟着那个目录走）：
 
 | 文件 | 内容 |
 | --- | --- |
@@ -132,7 +133,7 @@ HWND 的矩形、`GWL_STYLE`、窗口状态全部纹丝不动。现改走 `QMain
 按这个顺序查：
 1. `setup.bat` 跑过没有（`.venv\Scripts\pythonw.exe` 在不在）
 2. `debug.bat` 里看真实报错 —— `start.bat` 用的是 `pythonw`，报错不会显示
-3. `%LOCALAPPDATA%\ReplayStudio\logs\` 下最新的 `session-*.log`
+3. 数据目录 `logs\` 下最新的 `session-*.log`（设置页有「打开日志目录」按钮）
 
 `start.bat` 只在"进程起来后 1 秒内又没了"时才提示，慢一点的崩溃它抓不到，
 这种情况一律上 `debug.bat`。

@@ -1,8 +1,30 @@
 # 项目状态
 
-更新：2026-10-23（Phase 1 + 主题系统 + Phase 2 通用播放器 + 播放生命周期重构 + 三至六轮稳定性修复 + 全屏与分类计数 + 第七轮单实例与缩略图管线 + 数据库性能优化）
+更新：2026-10-23（Phase 1 + 主题系统 + Phase 2 通用播放器 + 播放生命周期重构 + 三至六轮稳定性修复 + 全屏与分类计数 + 第七轮单实例与缩略图管线 + 数据库性能优化 + 录屏默认目录 + 数据目录迁出 C:）
 
 ## ✅ 已完成并通过验证
+
+### 数据目录迁出 C:（2026-10-23）
+- **应用自己的数据不再写 `%LOCALAPPDATA%`**：索引库、缩略图缓存、截图、日志默认落在
+  `<repo>/data`（本机 `D:\WorkSpace\WorkBuddySpace\apps\ReplayStudio\data`）。
+  `REPLAYSTUDIO_DATA_DIR` 可整体覆盖，冒烟测试因此不再读写真实索引
+- **首次启动自动搬运旧目录**，只复制不删除（旧的 C: 目录 82 MB 仍保留，确认新目录
+  正常后可手动删）；已有 `index.db` 则跳过，不会每次启动重复制一遍
+- **日志跟着走**：`diagnostics.log_dir()` 之前自己拼 `%LOCALAPPDATA%`，会留在 C:
+- **截图路径与文档对齐**：原来写 `~\Pictures\ReplayStudio`（也在 C:），而文档一直说
+  截图在数据目录里，现在统一为 `user_data_dir()/screenshots`
+- **验证**：`tools/probe_data_dir.py` 三段（环境变量优先 / 迁移语义 / 本机实际解析）
+  全过；`smoke_core` / `smoke_db_perf` / `smoke_gui` / `smoke_phase2` 19/19 /
+  `smoke_record_ui` 35/35 / `smoke_tabs` 25/25 / `smoke_exit` 2/2 全绿
+- 过程记录：`docs/devlog/012-data-dir-off-c.md`
+
+### 录屏默认目录不再落在 C:（2026-10-23）
+- `record_dir` 的默认一直是 `%LOCALAPPDATA%\ReplayStudio\recordings`，也就是把视频
+  往 C: 写。现在默认**挨着游戏自己的精彩片段**：先找 `D:\Document\Video\Valorant`
+  这类目录，找不到再退到其它固定盘，只有都没有时才回 LOCALAPPDATA
+- 已存的老值（空 / 旧默认）在录屏页打开时自动迁移并回写
+- **验证**：`tools/probe_record_dir.py` 实测 `spec.output_dir` 与 OBS 的
+  `GetRecordDirectory` 都是 `D:\Document\Video\Valorant\ReplayStudio`
 
 ### 第六轮：全屏 + 分类计数（2026-10-22）
 - **全屏之前是个空操作**：mpv 的 `fullscreen` 属性管的是它自己创建的窗口，嵌入模式
@@ -144,6 +166,11 @@
 - mpv 渲染在原生子窗口，`win.grab()` 抓不到画面（正常播放不受影响，截图里视频区是黑的）
 - 播放上下文是"打开时的快照"：播放中切筛选不会影响已在播的队列（设计如此，见 ADR-002）
 - 标签数上限 6（`MAX_TABS`）是经验值，未做显存压力测试
+- **旧的 C: 数据目录没被删**（迁移只复制）。新目录用着没问题后，可以手动删掉
+  `%LOCALAPPDATA%\ReplayStudio`（82 MB）
+- **打包后 `<repo>/data` 会变成 exe 同级目录**，装在 Program Files 时会因不可写而退回
+  LOCALAPPDATA。Phase 5 打包时要重新定这个位置（更可能是 `Documents\ReplayStudio`）
+- **缩略图缓存没有上限**，只增不减。现在 80 MB 量级，到 GB 级需要加 LRU
 - 录屏依赖外部 OBS 进程：OBS 关闭/崩溃时录制会中断，Phase 3 需要做状态同步与重连提示
 - OBS 便携模式下的 NVENC/QSV 等编码器需在实际录制时逐个探测可用性
 
@@ -186,7 +213,9 @@ cd D:\WorkSpace\WorkBuddySpace\apps\ReplayStudio
 ```
 
 依赖：`vendor/mpv/libmpv-2.dll`（已就位）、FFmpeg（PATH 中，Scoop）。
-数据目录：`%LOCALAPPDATA%\ReplayStudio\`（索引库 + 缩略图缓存 + 截图 + `logs\` 日志，可整目录备份）。
+数据目录：默认 `<repo>/data`（索引库 + 缩略图缓存 + 截图 + `logs\` 日志，可整目录备份）；
+设 `REPLAYSTUDIO_DATA_DIR` 可改到别处。旧的 `%LOCALAPPDATA%\ReplayStudio\` 会在首次启动时
+被复制过来，原目录保留不动。
 
 ## 🧪 如何验证
 
@@ -200,6 +229,7 @@ cd D:\WorkSpace\WorkBuddySpace\apps\ReplayStudio
 .venv\Scripts\python.exe tools\smoke_phase2.py          # 播放器全部功能 19 项
 .venv\Scripts\python.exe tools\smoke_containers.py      # 容器兼容 + 损坏容错 9 项
 .venv\Scripts\python.exe tools\smoke_playback.py        # 真实录像播放
+.venv\Scripts\python.exe tools\probe_data_dir.py        # 数据目录解析与迁移语义
 ```
 
 所有脚本都走与正式程序一致的退出路径，**退出码 0 本身也是断言**（此前退出即段错误）。

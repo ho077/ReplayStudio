@@ -12,7 +12,7 @@
 | --- | --- |
 | 形态 | 双击即用的 Windows 11 桌面程序，**不需要装 Python** |
 | 体积 | 越小越好，但要能离线播放（libmpv 必须随包） |
-| 数据 | 仍然只写 `%LOCALAPPDATA%\ReplayStudio\`，不碰 ACLOS 原始文件 |
+| 数据 | 只写自己的数据目录（`user_data_dir()`，默认 exe 同级 `data\`），不碰 ACLOS 原始文件 |
 | 更新 | 不能因为改一行 Python 就重打 300 MB → 优先 onedir |
 | 合规 | 分发二进制必须带许可证清单（见第 6 节，**这是硬约束**） |
 | 未签名 | 没有代码签名证书，SmartScreen 会拦一次；要在文档里说明 |
@@ -211,7 +211,9 @@ spec 里还要手工确认/补充：
 - [ ] 主题切换正常（QSS 是运行时拼的字符串，理论上与打包无关）
 - [ ] 关闭应用**不崩溃**（`tools/smoke_exit.py` 的思路要在 exe 上重跑一遍；
       libmpv 的 DLL detach 问题不受打包影响，但要确认 `hard_exit` 在冻结环境仍生效）
-- [ ] 日志目录仍能写：`%LOCALAPPDATA%\ReplayStudio\logs\`
+- [ ] 日志目录仍能写：`user_data_dir()/logs\`。**注意**：默认目录是 exe 同级 `data\`，
+      exe 装在 Program Files 时会因不可写而退回 `%LOCALAPPDATA%\ReplayStudio\logs\`。
+      打包时要先定死这个位置（倾向 `Documents\ReplayStudio`），别留到用户机器上随机落点
 - [ ] 中文/空格路径的视频能打开
 - [ ] 卸载方式明确（onedir 直接删目录；若做安装器则提供卸载入口）
 - [ ] `LICENSES/` 齐全

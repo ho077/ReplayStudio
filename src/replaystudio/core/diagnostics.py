@@ -16,8 +16,9 @@ allowed to take the app down:
 * Qt message handler → ``qWarning`` / ``qFatal`` from Qt itself, which would
   otherwise go to a console nobody reads on a windowed build.
 
-Logs land in ``%LOCALAPPDATA%\\ReplayStudio\\logs\\``. Files older than
-``KEEP`` days are pruned on startup so the directory cannot grow forever.
+Logs land in the app data folder (see ``core.db.user_data_dir``) under
+``logs\\``. Files older than ``KEEP`` days are pruned on startup so the
+directory cannot grow forever.
 """
 from __future__ import annotations
 
@@ -29,14 +30,17 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 
+from .db import user_data_dir
+
 KEEP = 7                      # days of session logs to retain
 _crash_file = None            # keep the handle alive: faulthandler needs it
 _log_path: Path | None = None
 
 
 def log_dir() -> Path:
-    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
-    return Path(base) / "ReplayStudio" / "logs"
+    # Follows the data folder (see core.db.user_data_dir), not hard-coded to
+    # %LOCALAPPDATA% — otherwise logs would stay on C: after the move.
+    return Path(user_data_dir()) / "logs"
 
 
 def _prune(directory: Path):

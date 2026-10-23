@@ -28,7 +28,9 @@
 
 ## 数据流（以"打开无畏时刻页面"为例）
 
-1. `main_window` 启动时创建 `IndexDatabase`（`%LOCALAPPDATA%/ReplayStudio/index.db`）。
+1. `main_window` 启动时创建 `IndexDatabase`（`user_data_dir()/index.db`，默认
+   `<repo>/data/index.db`，可用 `REPLAYSTUDIO_DATA_DIR` 改；旧位置
+   `%LOCALAPPDATA%/ReplayStudio/index.db` 首次启动会被复制过来）。
 2. `MomentsPage.refresh()` → `db.query_videos(filter)` → `grid.set_rows(rows)`。
 3. 每张卡片绘制时向 model 要 `DecorationRole` → 没有 pixmap 就向 `ThumbnailService`
    请求 → 后台线程生成 → `done` 信号 → 单卡片 `dataChanged` 重绘。

@@ -12,6 +12,7 @@ Design rules that come straight from the 100 GB+ requirement:
 from __future__ import annotations
 
 import os
+import shutil
 import sqlite3
 import threading
 import time
@@ -141,10 +142,77 @@ SORT_COLUMNS = {
 }
 
 
-def user_data_dir() -> str:
+#: Overrides the data folder completely. Set by the smoke tests so they never
+#: touch the real index; unset in normal runs.
+DATA_DIR_ENV = "REPLAYSTUDIO_DATA_DIR"
+
+# <repo>/data  (src/replaystudio/core/db.py -> four levels up)
+_APP_ROOT = os.path.dirname(os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+_data_dir_cache: str | None = None
+
+
+def legacy_data_dir() -> str:
+    """Where the data used to live: %LOCALAPPDATA%\\ReplayStudio, i.e. on C:."""
     base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~\\AppData\\Local")
-    d = os.path.join(base, "ReplayStudio")
-    os.makedirs(d, exist_ok=True)
+    return os.path.join(base, "ReplayStudio")
+
+
+def _migrate_legacy_data(old: str, new: str) -> bool:
+    """Copy an existing C: data folder into `new`. Copies only, never deletes.
+
+    Runs at most once in practice: it bails out as soon as `new` already holds
+    an index. Single-instance hand-off files (`open_req_*`) are skipped — they
+    are per-launch scratch, not data.
+    """
+    try:
+        if os.path.normcase(os.path.abspath(old)) == os.path.normcase(os.path.abspath(new)):
+            return False
+        if not os.path.isdir(old):
+            return False
+        # Nothing worth carrying over, or already carried over.
+        if not os.path.isfile(os.path.join(old, "index.db")):
+            return False
+        if os.path.isfile(os.path.join(new, "index.db")):
+            return False
+        os.makedirs(new, exist_ok=True)
+        for name in os.listdir(old):
+            if name.startswith("open_req_"):
+                continue
+            src, dst = os.path.join(old, name), os.path.join(new, name)
+            if os.path.isdir(src):
+                shutil.copytree(src, dst, dirs_exist_ok=True)
+            elif os.path.isfile(src):
+                shutil.copy2(src, dst)
+        return True
+    except OSError:
+        return False
+
+
+def user_data_dir() -> str:
+    """The app's own folder: index.db, thumbnail cache, screenshots, logs.
+
+    Default is ``<repo>/data`` — next to the code, on D: for this install.
+    The old location was ``%LOCALAPPDATA%\\ReplayStudio``, which quietly put
+    the index and an ever-growing thumbnail cache on C:; an existing folder
+    there is copied across on first start (and left in place — we do not
+    delete user data as a side effect of an upgrade).
+    """
+    global _data_dir_cache
+    if _data_dir_cache:
+        return _data_dir_cache
+    env = (os.environ.get(DATA_DIR_ENV) or "").strip()
+    d = env or os.path.join(_APP_ROOT, "data")
+    try:
+        os.makedirs(d, exist_ok=True)
+    except OSError:
+        # e.g. installed under Program Files with no write access.
+        d = legacy_data_dir()
+        os.makedirs(d, exist_ok=True)
+    if not env:
+        _migrate_legacy_data(legacy_data_dir(), d)
+    _data_dir_cache = d
     return d
 
 
