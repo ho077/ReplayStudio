@@ -32,60 +32,62 @@ def check(name: str, ok: bool, detail: str = ""):
 
 
 def main() -> int:
-    path = os.environ.get("RS_DB") or os.path.join(user_data_dir(), "index.db")
-    real = os.path.isfile(path)
-    db = Database(path)
-    print(f"db: {path}")
-
-    print("== connection reuse ==")
-    with db.read_conn() as c1:
-        id1 = id(c1)
-    with db.read_conn() as c2:
-        id2 = id(c2)
-    check("read connection is cached", id1 == id2, f"{id1} != {id2}")
-
-    try:
-        with db.read_conn() as c:
-            c.execute("CREATE TABLE should_not_work(x)")
-        check("read connection rejects writes", False, "write went through")
-    except sqlite3.OperationalError:
-        check("read connection rejects writes", True)
-
-    # A cached handle that dies must be replaced, not reused. (The failed write
-    # above already dropped ours, so make sure something read first.)
-    db.get_setting("probe", "x")
-    db._ro.close()
-    check("reopens after the handle is closed", db.get_setting("probe", "x") == "x")
-
-    db.set_setting("probe", "written")
-    check("write visible to the cached reader", db.get_setting("probe") == "written")
-
-    print("== thread safety ==")
-    seen = []
-
-    def worker():
-        seen.append(db.get_setting("probe"))
-
-    threads = [threading.Thread(target=worker) for _ in range(8)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-    check("same connection from 8 threads", set(seen) == {"written"}, f"{seen!r}")
-
-    print("== temporary databases stay deletable ==")
+    # Functional checks run against a scratch database: they write, and writing
+    # into the user's real index to test a settings round-trip is rude — it also
+    # made an earlier version of this test non-repeatable (the key survived).
     with tempfile.TemporaryDirectory() as td:
-        tmp_db = Database(os.path.join(td, "t.db"))
-        tmp_db.set_setting("k", "v")
-        tmp_db.get_setting("k")
-        tmp_db.close()
-    check("close() releases the file handle", True)     # cleanup would throw first
+        db = Database(os.path.join(td, "scratch.db"))
 
-    if not real:
-        print("\nonly a scratch db, skipping real-data timings")
+        print("== connection reuse ==")
+        with db.read_conn() as c1:
+            id1 = id(c1)
+        with db.read_conn() as c2:
+            id2 = id(c2)
+        check("read connection is cached", id1 == id2, f"{id1} != {id2}")
+
+        try:
+            with db.read_conn() as c:
+                c.execute("CREATE TABLE should_not_work(x)")
+            check("read connection rejects writes", False, "write went through")
+        except sqlite3.OperationalError:
+            check("read connection rejects writes", True)
+
+        # A cached handle that dies must be replaced, not reused. (The failed
+        # write above already dropped ours, so read once to get a fresh one.)
+        db.get_setting("probe", "x")
+        db._ro.close()
+        check("reopens after the handle is closed",
+              db.get_setting("probe", "x") == "x")
+
+        db.set_setting("probe", "written")
+        check("write visible to the cached reader",
+              db.get_setting("probe") == "written")
+
+        print("== thread safety ==")
+        seen = []
+
+        def worker():
+            seen.append(db.get_setting("probe"))
+
+        threads = [threading.Thread(target=worker) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        check("same connection from 8 threads", set(seen) == {"written"},
+              f"{seen!r}")
+
+        db.close()
+    # The TemporaryDirectory above only deletes if close() released the handle.
+    check("close() releases the file handle", True)
+
+    path = os.environ.get("RS_DB") or os.path.join(user_data_dir(), "index.db")
+    if not os.path.isfile(path):
+        print("\nno real index here, skipping timings")
         print(f"\n{PASS} passed, {FAIL} failed")
         return 1 if FAIL else 0
 
+    db = Database(path)
     print("== timings on the real index (ms) ==")
 
     def best(fn, n=5):

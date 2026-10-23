@@ -564,6 +564,13 @@ class MainWindow(QMainWindow):
             self.record.close_down()
         except Exception:  # noqa: BLE001
             pass
-        self.thumbs.pool.waitForDone(3000)
+        # Drop whatever is only queued, then give a running ffmpeg a short
+        # grace. Waiting the old 3000 ms meant every quit paid three seconds
+        # whenever a thumbnail job happened to be in flight, and an unfinished
+        # job is harmless now that the cache is written atomically (.part +
+        # rename): nobody can see a half-written JPEG.
+        self.thumbs.pool.clear()
+        if self.thumbs.pool.activeThreadCount():
+            self.thumbs.pool.waitForDone(250)
         diagnostics.note("window closed")
         super().closeEvent(e)

@@ -193,6 +193,11 @@ class Recorder(QObject):
         self._home = obs_paths.obs_home()
         self._port = obs_paths.DEFAULT_PORT
         self._input_uuid = ""
+        # Did this session touch OBS at all? Quitting used to run the OBS
+        # shutdown path unconditionally, and "is it running?" is answered by
+        # spawning tasklist — a quarter of a second spent on every exit of a
+        # session that never opened the record page.
+        self._obs_touched = False
 
         self._timer = QTimer(self)
         self._timer.setInterval(500)
@@ -216,6 +221,7 @@ class Recorder(QObject):
             self.connectionChanged.emit(False, msg)
             return
         cfg = obs_paths.read_ws_config(self._home) or obs_paths.ensure_ws_config(self._home)
+        self._obs_touched = True
         client = ObsClient("127.0.0.1", self._port, cfg.get("server_password") or "", self)
         client.identified.connect(self._on_identified)
         client.eventReceived.connect(self._on_event)
@@ -224,11 +230,22 @@ class Recorder(QObject):
         self.connectionChanged.emit(False, "正在连接 OBS…")
         client.open()
 
-    def disconnect_obs(self):
+    def disconnect_obs(self, budget: float = 3.0):
+        """Leave OBS alone. `budget` is how many seconds quitting may spend on it.
+
+        We only shut OBS down if this session actually started or connected to
+        it. An OBS the user launched themselves is theirs, and a session that
+        never touched OBS has nothing to clean: the run marker is swept on the
+        next launch anyway.
+        """
+        if not self._obs_touched:
+            self.client = None
+            return
         if self.state != IDLE:
             self.stop()
-        obs_launcher.stop(self.client, self._home)
+        obs_launcher.stop(self.client, self._home, budget=budget)
         self.client = None
+        self._obs_touched = False
         self.connectionChanged.emit(False, "已断开")
 
     def _on_identified(self, info):

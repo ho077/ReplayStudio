@@ -30,8 +30,48 @@ OBS_IMAGE = "obs64.exe"
 
 
 # ------------------------------------------------------------------ observation
+# PIDs of OBS processes we know about — ones we started, or ones we found while
+# connecting. Asking tasklist is the only *general* way to find OBS, but it
+# costs a subprocess spawn (~250 ms measured), and quitting the app used to pay
+# that on every single exit just to learn "OBS is not running". Remembering the
+# PID turns that into a handle query.
+_KNOWN_PIDS: set[int] = set()
+
+
+def _alive(pid: int) -> bool:
+    """Is this PID still a live process? ctypes only — no subprocess."""
+    try:
+        import ctypes
+
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+        k32.OpenProcess.restype = ctypes.c_void_p
+        handle = k32.OpenProcess(0x1000, False, pid)   # QUERY_LIMITED_INFORMATION
+        if not handle:
+            return False
+        try:
+            code = ctypes.c_ulong()
+            ok = k32.GetExitCodeProcess(handle, ctypes.byref(code))
+            return bool(ok) and code.value == 259       # STILL_ACTIVE
+        finally:
+            k32.CloseHandle(handle)
+    except Exception:
+        return False
+
+
 def pids() -> list[int]:
     """PIDs of running obs64.exe processes (portable copy or installed one)."""
+    if _KNOWN_PIDS:
+        live = [p for p in _KNOWN_PIDS if _alive(p)]
+        if live:
+            return live
+        # Everything we knew about is gone. Fall through to the scan: an OBS the
+        # user started themselves would not be in our set, and missing it would
+        # make start() open a second copy over the same profile.
+    return _pids_tasklist()
+
+
+def _pids_tasklist() -> list[int]:
     try:
         done = subprocess.run(
             ["tasklist", "/fi", f"imagename eq {OBS_IMAGE}", "/nh"],
@@ -169,6 +209,7 @@ def start(home: str | None = None, port: int = obs_paths.DEFAULT_PORT,
         return False, f"OBS 主程序不存在：{exe}"
 
     if is_running():
+        _KNOWN_PIDS.update(pids())       # remember it so stopping is cheap
         return True, "OBS 已经在运行，复用它（不重复启动）"
 
     cfg = obs_paths.ensure_ws_config(home, port)
@@ -181,12 +222,14 @@ def start(home: str | None = None, port: int = obs_paths.DEFAULT_PORT,
     # to the cwd; launch it from vendor/obs and it puts up a bare "Error" box and
     # kills itself before writing a single log line. Measured both ways.
     try:
-        subprocess.Popen([exe, *obs_paths.LAUNCH_ARGS], cwd=os.path.dirname(exe),
-                         stdin=subprocess.DEVNULL,
-                         stdout=subprocess.DEVNULL,
-                         stderr=subprocess.DEVNULL)
+        proc = subprocess.Popen([exe, *obs_paths.LAUNCH_ARGS],
+                                cwd=os.path.dirname(exe),
+                                stdin=subprocess.DEVNULL,
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL)
     except OSError as exc:
         return False, f"启动 OBS 失败：{exc}"
+    _KNOWN_PIDS.add(proc.pid)
 
     if not wait:
         return True, f"已启动 OBS{note}（未等待端口）"
@@ -225,8 +268,14 @@ def _gone(timeout: float) -> bool:
     return False
 
 
-def stop(client=None, home: str | None = None, timeout: float = 25.0) -> tuple[bool, str]:
+def stop(client=None, home: str | None = None, timeout: float = 25.0,
+         budget: float | None = None) -> tuple[bool, str]:
     """Shut OBS down, cleanest method first.
+
+    `budget` caps the *whole* call in seconds. Quitting the app must not take
+    25 s: with OBS running the three stages (WM_CLOSE, taskkill, taskkill /f)
+    could each wait their full timeout. The interactive "stop OBS" button passes
+    nothing and keeps the patient default; the quit path passes budget=3.0.
 
     1. Post WM_CLOSE to OBS's main window. It saves its profile and removes its
        own `.sentinel` marker on the way out, which is the whole point.
@@ -238,6 +287,11 @@ def stop(client=None, home: str | None = None, timeout: float = 25.0) -> tuple[b
     them Exit) and OBS registers no exit hotkey either, so a window message is
     what is left.
     """
+    deadline = time.time() + (budget if budget is not None else timeout)
+
+    def left(seconds: float) -> float:
+        return max(0.0, min(seconds, deadline - time.time()))
+
     if not is_running():
         obs_paths.clear_sentinel(home or obs_paths.obs_home())
         return True, "OBS 未在运行"
@@ -264,18 +318,26 @@ def stop(client=None, home: str | None = None, timeout: float = 25.0) -> tuple[b
             pass
 
     sent = ask_close()
-    if sent and _gone(min(10.0, timeout)):
+    if sent and _gone(left(10.0)):
         obs_paths.clear_sentinel(home or obs_paths.obs_home())
         return True, "OBS 已正常退出（WM_CLOSE）"
 
-    if _taskkill(force=False) and _gone(min(8.0, timeout)):
+    # Whatever is left of the budget goes to the graceful kill. Forcing it is
+    # then all-or-nothing: we clear the run marker ourselves on the way out, so
+    # an OBS that survives does not get blamed on the next launch.
+    if left(0.1) and _taskkill(force=False) and _gone(left(8.0)):
         obs_paths.clear_sentinel(home or obs_paths.obs_home())
         return True, f"OBS 已关闭（taskkill，WM_CLOSE sent={sent}）"
 
     _taskkill(force=True)
-    if _gone(min(7.0, timeout)):
+    if _gone(left(7.0)):
         removed = obs_paths.clear_sentinel(home or obs_paths.obs_home())
         tail = f"，并清掉 {removed} 个残留标记" if removed else ""
         return True, f"OBS 已强制结束（WM_CLOSE sent={sent}）{tail}"
 
-    return False, "OBS 没能退出，可能还有一个窗口在等你点确认"
+    # Out of budget with OBS still alive — a dialog of its own is probably
+    # waiting on the user. Clear the marker anyway: this launch should not be
+    # blamed for it on the next one.
+    removed = obs_paths.clear_sentinel(home or obs_paths.obs_home())
+    tail = f"，并清掉 {removed} 个残留标记" if removed else ""
+    return False, f"OBS 没能退出，可能还有一个窗口在等你点确认{tail}"
